@@ -1,0 +1,218 @@
+syntax = "proto3";
+package Bep.protobufs;
+
+message Hello {
+   string device_name    = 1;
+   string client_name    = 2;
+   string client_version = 3;
+}
+
+message Header {
+   MessageType type = 1;
+   MessageCompression compression = 2;
+}
+
+enum MessageType {
+    CLUSTER_CONFIG    = 0;
+    INDEX             = 1;
+    INDEX_UPDATE      = 2;
+    REQUEST           = 3;
+    RESPONSE          = 4;
+    DOWNLOAD_PROGRESS = 5;
+    PING              = 6;
+    CLOSE             = 7;
+}
+
+enum MessageCompression {
+    NONE = 0;
+    LZ4  = 1;
+}
+
+message ClusterConfig {
+    // list of folders that will be synchronized over the
+    // current connection
+    repeated Folder folders = 1;
+}
+
+message Folder {
+    string id                   = 1; // unique identifier
+    string label                = 2; // human readable name
+    bool   read_only            = 3; // if set, the device will receive no updates for this folder
+    bool   ignore_permissions   = 4; // if set, the device will not accept or announce permissions
+    bool   ignore_delete        = 5; // if set, the device will ignore deletes for this folder
+    bool paused                 = 7; // folders that are currenly paused
+
+    bool   disable_temp_indexes = 6; // set for folders that will not dispatch and do not wish
+                                     // to receive progress updates about partially downloaded
+                                     // files via Download Progress messages
+
+    repeated Device devices = 16;
+}
+
+message Device {
+    // 32 bit unique id for this device.
+    // Syrus uses the SHA-256 of the device X.509 certificate
+    bytes           id                         = 1;
+
+    // Human readable name assigned to the described
+    // device by the sending device. May be empty and
+    string          name                       = 2;
+
+    // The list of addresses used by the sending device to connect
+    // to the described device
+    repeated string addresses                  = 3;
+
+    // Indicates the compression mode for this device and folder
+    Compression     compression                = 4;
+
+    // Indicates the expected certificate name for this device
+    // Is usually blank, indicating to use the implementation default
+    string          cert_name                  = 5;
+
+    // Contains the highest sequence number of the files in the index
+    int64           max_sequence               = 6;
+
+    // set for devices that are trusted as cluster introducers
+    bool            introducer                 = 7;
+
+    // Contains the unique identifier for the current set of index data
+    uint64          index_id                   = 8;
+
+    // Indicates if the remote device has opted to ignore introduction removals
+    // for a given device. This setting is copied across as we are being
+    // introduced to a new device
+    bool            skip_introduction_removals = 9;
+}
+
+enum Compression {
+    METADATA = 0; // Enables compression of metadata messages like Index
+    NEVER    = 1; // Compression disabled for all messages
+    ALWAYS   = 2; // Both metadata and response messages are compressed
+}
+
+message Index {
+    string            folder = 1;
+    repeated FileInfo files  = 2;
+}
+
+message IndexUpdate {
+    string            folder = 1;
+    repeated FileInfo files  = 2;
+}
+
+message FileInfo {
+    string       name           = 1;
+    FileInfoType type           = 2;
+    int64        size           = 3;
+    uint32       permissions    = 4;
+    int64        modified_s     = 5;
+    int32        modified_ns    = 11;
+    uint64       modified_by    = 12;
+    bool         deleted        = 6;
+    bool         invalid        = 7;
+    bool         no_permissions = 8;
+    Vector       version        = 9;
+    int64        sequence       = 10;
+    int32        block_size     = 13;
+
+    repeated BlockInfo Blocks         = 16;
+    string             symlink_target = 17;
+}
+
+enum FileInfoType {
+    FILE              = 0;
+    DIRECTORY         = 1;
+    SYMLINK_FILE      = 2;
+    SYMLINK_DIRECTORY = 3;
+    SYMLINK_UNKNOWN   = 4;
+}
+
+message BlockInfo {
+    int64 offset     = 1;
+    int32 size       = 2;
+    bytes hash       = 3;
+    uint32 weak_hash = 4;
+}
+
+message Vector {
+    repeated Counter counters = 1;
+}
+
+message Counter {
+    uint64 id    = 1;
+    uint64 value = 2;
+}
+
+// Expresses desire to receive a data block corresponding to a certain file
+// in the peer's folder
+message Request {
+    // Request identifier. It will be matched by a corresponding Response message
+    // Each outstanding request must have a unique id.
+    int32  id             = 1;
+
+    // folder and name are documented for the index message.
+    // offset and size fields specify the region of the file to be transferred.
+    // This should equate to exactly one block as seen in an Index message.
+    string folder         = 2;
+    string name           = 3;
+    int64  offset         = 4;
+    int32  size           = 5;
+
+    // MAY be set to the expected hash value of the block. If set, the other
+    // device SHOULD ensure that the transmitted block matches the requested
+    // hash. The other device MAY reuse a block from a different file and offset
+    // having the same size and hash, if one exists.
+    bytes  hash           = 6;
+
+    // is set to indicate that the read should be performed from the temporary
+    // file (converting name to it's temporary form) and falling back to the
+    // non-temporary file if any error occurs. Knowledge of contents of
+    // temporary files comes form DownloadProgress messages.
+    bool   from_temporary = 7;
+}
+
+message Response {
+    // Request identifier
+    int32     id   = 1;
+    // Requested data block or empty if the requested block is not available
+    bytes     data = 2;
+    // Error code describing a reason a Request could not be fulfilled, in the
+    // case where zero length data was returned.
+    ErrorCode code = 3;
+}
+
+enum ErrorCode {
+    NO_ERROR     = 0; // data is present
+    GENERIC      = 1;
+
+    // the requested file doesn't exist, or the offset is outside
+    // the acceptable range for this file
+    NO_SUCH_FILE = 2;
+
+    // file exists but has invalid bit set or is otherwise unavailable
+    INVALID_FILE = 3;
+}
+
+message DownloadProgress {
+    string                              folder  = 1;
+    repeated FileDownloadProgressUpdate updates = 2;
+}
+
+message FileDownloadProgressUpdate {
+    FileDownloadProgressUpdateType update_type   = 1;
+    string                         name          = 2;
+    Vector                         version       = 3;
+    repeated int32                 block_indexes = 4;
+}
+
+enum FileDownloadProgressUpdateType {
+    APPEND = 0;
+    FORGET = 1;
+}
+
+message Ping {
+}
+
+message Close {
+    string reason = 1;
+}
