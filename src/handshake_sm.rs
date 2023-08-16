@@ -1,13 +1,15 @@
 use anyhow::{Context, Result};
 use bytes::{BufMut, BytesMut};
 use chacha20poly1305::{
-    aead::{AeadMut, Payload, Aead},
+    aead::{Aead, AeadMut, Payload},
     AeadCore, AeadInPlace, ChaCha20Poly1305, KeyInit,
 };
 
-// http://www.plantuml.com/plantuml/uml/SyfFKj2rKt3CoKnELR1Io4ZDoSa70000
+use crate::crypto_primitives;
 
-pub const IPFS_NOISE_PROTOCOL_NAME:  &str = "Noise_XX_25519_ChaChaPoly_SHA256";
+// TODO: put it somewhere else
+pub const IPFS_NOISE_PROTOCOL_NAME: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
+const TAGLEN: usize = 16;
 
 pub type CipherKey = [u8; 32];
 /// The key k and nonce n are used to encrypt static public keys and handshake payloads.
@@ -24,20 +26,13 @@ impl CipherState {
     /// ENCRYPT(k, n++, ad, plaintext). Otherwise returns plaintext.
     pub fn encrypt_with_ad(&mut self, ad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
         let ciphertext = if let Some(k) = &self.k {
-            let mut cipher = ChaCha20Poly1305::new(k.into());
+            let cipher = crypto_primitives::get_cipher_with_key(k)?;
 
-            // Size of the nonce in ChaCha full round is 12 bytes, convert the u64 to 12 bytes
-            let mut nonce = [0u8; 12];
-            nonce[4..].copy_from_slice(&self.n.to_le_bytes());
+            let ciphertext_len_with_tag = plaintext.len() + TAGLEN;
 
-            let payload = Payload {
-                msg: plaintext,
-                aad: ad,
-            };
+            let mut ciphertext = vec![0u8; ciphertext_len_with_tag];
 
-            let ciphertext = cipher
-                .encrypt(&nonce.into(), payload)
-                .context("while encrypting AEAD")?;
+            cipher.encrypt(self.n, ad, plaintext, &mut ciphertext);
 
             // TODO: overflow
             self.n += 1;
@@ -54,17 +49,12 @@ impl CipherState {
     /// If an authentication failure occurs in DECRYPT() then n is not incremented and an error is signaled to the caller.
     pub fn decrypt_with_ad(&mut self, ad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
         let plaintext = if let Some(k) = &self.k {
+            let cipher = crypto_primitives::get_cipher_with_key(k)?;
 
-            // TODO: might want to extract concrete implementation into newtype
-            let cipher = ChaCha20Poly1305::new(k.into());
+            let message_len = ciphertext.len() - TAGLEN;
 
-            // Size of the nonce in ChaCha full round is 12 bytes, convert the u64 to 12 bytes
-            let mut nonce = [0u8; 12];
-            nonce[4..].copy_from_slice(&self.n.to_le_bytes());
-
-
-            let payload = Payload { msg: ciphertext, aad: ad };
-            let plaintext = cipher.decrypt(&nonce.into(), payload).context("while decrypting AEAD")?;
+            let mut plaintext = vec![0u8; message_len];
+            cipher.decrypt(self.n, ad, ciphertext, &mut plaintext)?;
 
             self.n += 1;
 
@@ -88,7 +78,10 @@ pub struct SymmetricState {
 
 impl SymmetricState {
     pub fn initialize_symmetric(protocol: &str) -> Self {
-        assert_eq!(protocol, IPFS_NOISE_PROTOCOL_NAME, "Implementation currently supports only {IPFS_NOISE_PROTOCOL_NAME}");
+        assert_eq!(
+            protocol, IPFS_NOISE_PROTOCOL_NAME,
+            "Implementation currently supports only {IPFS_NOISE_PROTOCOL_NAME}"
+        );
         // TODO: do protocol padding
         //h = H(protocol)
         let h = todo!();

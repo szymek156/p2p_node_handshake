@@ -5,8 +5,14 @@ use snow::{
     types::Cipher,
 };
 
-pub fn get_cipher() -> Result<Box<dyn Cipher>> {
-    DefaultResolver::default()
+use crate::handshake_sm::CipherKey;
+
+pub fn get_cipher_with_key(k: &CipherKey) -> Result<Box<dyn Cipher>> {
+    let mut cipher = DefaultResolver::default()
         .resolve_cipher(&CipherChoice::ChaChaPoly)
-        .ok_or(anyhow!("Cannot resolve cipher"))
+        .ok_or(anyhow!("Cannot resolve cipher"))?;
+
+    cipher.set(k);
+
+    Ok(cipher)
 }
