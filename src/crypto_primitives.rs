@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use snow::{
     params::{CipherChoice, HashChoice, DHChoice},
     resolvers::{CryptoResolver, DefaultResolver},
-    types::{Cipher, Hash, Dh},
+    types::{Cipher, Hash, Dh, Random},
 };
 
 use crate::handshake_sm::CipherKey;
@@ -27,4 +27,10 @@ pub fn get_dh() -> Result<Box<dyn Dh>> {
     DefaultResolver::default()
         .resolve_dh(&DHChoice::Curve25519)
         .ok_or(anyhow!("Cannot resolve DH curve"))
+}
+
+pub fn get_rand() -> Result<Box<dyn Random>> {
+    DefaultResolver::default()
+        .resolve_rng()
+        .ok_or(anyhow!("Cannot resolve random generator"))
 }

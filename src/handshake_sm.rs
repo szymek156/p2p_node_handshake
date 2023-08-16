@@ -139,14 +139,10 @@ impl SymmetricState {
 pub struct HandshakeState {
     symmetric_state: SymmetricState,
     s: Option<Box<dyn Dh>>,
-    e: Option<Vec<u8>>,
-    rs: Option<Vec<u8>>,
-    re: Option<Vec<u8>>,
+    e: Option<Box<dyn Dh>>,
+    rs: Option<Box<dyn Dh>>,
+    re: Option<Box<dyn Dh>>,
     message_patterns: VecDeque<VecDeque<MessagePatternToken>>, // TODO: initiator flag
-}
-
-enum HandhsakePattern {
-    XX,
 }
 
 enum MessagePatternToken {
@@ -155,7 +151,7 @@ enum MessagePatternToken {
     EE,
     ES,
     SE,
-    SS
+    SS,
 }
 impl HandshakeState {
     // TODO: builder pattern required? Maybe typestate pattern, to enforce s to be set
@@ -166,9 +162,16 @@ impl HandshakeState {
         // TODO: convert str to enum
         let message_patterns = vec![
             vec![MessagePatternToken::E].into(),
-            vec![MessagePatternToken::E, MessagePatternToken::EE, MessagePatternToken::S, MessagePatternToken::ES].into(),
+            vec![
+                MessagePatternToken::E,
+                MessagePatternToken::EE,
+                MessagePatternToken::S,
+                MessagePatternToken::ES,
+            ]
+            .into(),
             vec![MessagePatternToken::S, MessagePatternToken::SE].into(),
-        ].into();
+        ]
+        .into();
 
         let mut s_dh = crypto_primitives::get_dh()?;
         s_dh.set(local_static_priv);
@@ -183,7 +186,6 @@ impl HandshakeState {
         // TODO: confirm that happens
         // symmetric_state.mix_hash(s_dh.pubkey())?;
 
-
         Ok(Self {
             symmetric_state,
             s: Some(s_dh),
@@ -195,30 +197,34 @@ impl HandshakeState {
     }
 
     pub fn write_message(&mut self, payload: &[u8], out: &mut [u8]) -> Result<()> {
-        if self.message_patterns.is_empty() {
+        let Some(current_pattern) = self.message_patterns.pop_front() else {
             return Err(anyhow!("No more message patterns to consume"));
-        }
+        };
 
-        let current_token = &self.message_patterns[0][0];
+        for token in current_pattern {
+            match token {
+                MessagePatternToken::E => {
+                    if self.e.is_some() {
+                        return Err(anyhow!("Invalid token, 'e' is already set"));
+                    }
+                    let mut e_dh = crypto_primitives::get_dh()?;
+                    e_dh.generate(crypto_primitives::get_rand()?.as_mut());
 
-        match current_token {
-            MessagePatternToken::E => {
-                if self.e.is_some() {
-                    return Err(anyhow!("Invalid token, 'e' is already set"));
+                    out.copy_from_slice(e_dh.pubkey());
+
+                    self.symmetric_state.mix_hash(e_dh.pubkey())?;
+                    self.e = Some(e_dh);
                 }
-                let dh = crypto_primitives::get_dh()?;
-
+                MessagePatternToken::S => todo!(),
+                MessagePatternToken::EE => todo!(),
+                MessagePatternToken::ES => todo!(),
+                MessagePatternToken::SE => todo!(),
+                MessagePatternToken::SS => todo!(),
             }
-            MessagePatternToken::S => todo!(),
-            MessagePatternToken::EE => todo!(),
-            MessagePatternToken::ES => todo!(),
-            MessagePatternToken::SE => todo!(),
-            MessagePatternToken::SS => todo!(),
-        }
 
-        if self.message_patterns[0].pop_front().is_none() {
-            // All tokens from given step completed, move to next one
-            self.message_patterns.pop_front();
+            // TODO: check is k is set, encrypt using aead, add h as aad?
+            // Appends EncryptAndHash(payload) to the buffer.
+            out.copy_from_slice(payload);
         }
 
         Ok(())
