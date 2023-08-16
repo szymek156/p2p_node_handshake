@@ -1,3 +1,6 @@
+mod handshake_sm;
+mod crypto_primitives;
+
 use std::io::prelude::*;
 use std::net::TcpStream;
 
@@ -6,6 +9,9 @@ use bytes::{Buf, BufMut, BytesMut};
 
 use libp2p::identity::ed25519::Keypair;
 use prost::Message;
+use snow::{resolvers::CryptoResolver, params::CipherChoice};
+
+use crate::handshake_sm::IPFS_NOISE_PROTOCOL_NAME;
 
 pub mod messages {
     include!(concat!(env!("OUT_DIR"), "/bep.protobufs.rs"));
@@ -54,7 +60,7 @@ fn main() -> Result<()> {
 fn with_snow(stream: &mut TcpStream) -> Result<()> {
     println!("SNOW handshake begin");
 
-    let builder = snow::Builder::new("Noise_XX_25519_ChaChaPoly_SHA256".parse().unwrap());
+    let builder = snow::Builder::new(IPFS_NOISE_PROTOCOL_NAME.parse().unwrap());
 
     let static_keypair = builder.generate_keypair().unwrap();
     let static_key = static_keypair.private.clone();
@@ -160,6 +166,14 @@ fn my_attempt(stream: &mut TcpStream) -> Result<()> {
     let id_keypair = libp2p::identity::ed25519::Keypair::generate();
     let static_keypair = libp2p::identity::ed25519::Keypair::generate();
 
+
+    let x = snow::resolvers::DefaultResolver::default();
+    let dh = x.resolve_dh(&snow::params::DHChoice::Curve25519).unwrap();
+    let c = x.resolve_cipher(&CipherChoice::ChaChaPoly).unwrap();
+    let h = x.resolve_hash(&snow::params::HashChoice::SHA256).unwrap();
+
+
+
     let ephemeral_pub = id_keypair.public().to_bytes();
 
     // -> e
@@ -186,6 +200,7 @@ fn my_attempt(stream: &mut TcpStream) -> Result<()> {
     // TODO:
     // look here:
     // libp2p-rs/protocols/noise/tests/testx.rs
+    // https://docs.rs/x25519-dalek/latest/x25519_dalek/
 
 
     Ok(())
