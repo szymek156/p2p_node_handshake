@@ -1,5 +1,5 @@
-mod handshake_sm;
 mod crypto_primitives;
+mod handshake_sm;
 
 use std::io::prelude::*;
 use std::net::TcpStream;
@@ -9,7 +9,7 @@ use bytes::{Buf, BufMut, BytesMut};
 
 use libp2p::identity::ed25519::Keypair;
 use prost::Message;
-use snow::{resolvers::CryptoResolver, params::CipherChoice};
+use snow::{params::CipherChoice, resolvers::CryptoResolver};
 
 use crate::handshake_sm::IPFS_NOISE_PROTOCOL_NAME;
 
@@ -50,7 +50,8 @@ fn main() -> Result<()> {
     //         .into()
     // }
 
-    with_snow(&mut stream)?;
+    // with_snow(&mut stream)?;
+    compare_side_by_side()?;
 
     // my_attempt(&mut stream)?;
 
@@ -161,47 +162,58 @@ fn with_snow(stream: &mut TcpStream) -> Result<()> {
     Ok(())
 }
 
-fn my_attempt(stream: &mut TcpStream) -> Result<()> {
-    println!("ME handshake begin");
-    let id_keypair = libp2p::identity::ed25519::Keypair::generate();
-    let static_keypair = libp2p::identity::ed25519::Keypair::generate();
+// fn my_attempt(stream: &mut TcpStream) -> Result<()> {
+//     println!("ME handshake begin");
+//     let id_keypair = libp2p::identity::ed25519::Keypair::generate();
+//     let static_keypair = libp2p::identity::ed25519::Keypair::generate();
 
+//     let x = snow::resolvers::DefaultResolver::default();
+//     let dh = x.resolve_dh(&snow::params::DHChoice::Curve25519).unwrap();
+//     let c = x.resolve_cipher(&CipherChoice::ChaChaPoly).unwrap();
+//     let h = x.resolve_hash(&snow::params::HashChoice::SHA256).unwrap();
 
-    let x = snow::resolvers::DefaultResolver::default();
-    let dh = x.resolve_dh(&snow::params::DHChoice::Curve25519).unwrap();
-    let c = x.resolve_cipher(&CipherChoice::ChaChaPoly).unwrap();
-    let h = x.resolve_hash(&snow::params::HashChoice::SHA256).unwrap();
+//     let ephemeral_pub = id_keypair.public().to_bytes();
 
+//     // -> e
+//     let mut finalbuf = BytesMut::new();
+//     finalbuf.put_u16(ephemeral_pub.len() as u16);
+//     finalbuf.put_slice(&ephemeral_pub);
+//     stream.write_all(&finalbuf).unwrap();
 
+//     let mut buf = BytesMut::zeroed(1024);
 
-    let ephemeral_pub = id_keypair.public().to_bytes();
+//     // The second message consists of a cleartext public key ("e")
+//     // followed by an encrypted public key ("s")
+//     // followed by an encrypted payload.
+//     // <- [len] e, ee, s, es [data]
+//     let rcv = stream.read(&mut buf)?;
+//     println!("read {rcv} bytes");
 
-    // -> e
-    let mut finalbuf = BytesMut::new();
-    finalbuf.put_u16(ephemeral_pub.len() as u16);
-    finalbuf.put_slice(&ephemeral_pub);
-    stream.write_all(&finalbuf).unwrap();
+//     buf.resize(rcv, 0);
+//     let len = buf.get_u16();
+//     println!("len in payload {len} bytes");
 
-    let mut buf = BytesMut::zeroed(1024);
+//     // TODO:
+//     // look here:
+//     // libp2p-rs/protocols/noise/tests/testx.rs
+//     // https://docs.rs/x25519-dalek/latest/x25519_dalek/
 
-    // The second message consists of a cleartext public key ("e")
-    // followed by an encrypted public key ("s")
-    // followed by an encrypted payload.
-    // <- [len] e, ee, s, es [data]
-    let rcv = stream.read(&mut buf)?;
-    println!("read {rcv} bytes");
+//     Ok(())
+// }
 
-    buf.resize(rcv, 0);
-    let len = buf.get_u16();
-    println!("len in payload {len} bytes");
+fn compare_side_by_side() -> Result<()> {
+    let builder = snow::Builder::new(IPFS_NOISE_PROTOCOL_NAME.parse().unwrap());
 
+    let static_keypair = builder.generate_keypair().unwrap();
+    let static_key = static_keypair.private.clone();
 
+    let mut initiator = builder
+        .local_private_key(&static_key)
+        .build_initiator()
+        .unwrap();
 
-    // TODO:
-    // look here:
-    // libp2p-rs/protocols/noise/tests/testx.rs
-    // https://docs.rs/x25519-dalek/latest/x25519_dalek/
-
+    let noise_sm =
+        handshake_sm::HandshakeState::initialize(IPFS_NOISE_PROTOCOL_NAME, &static_key).unwrap();
 
     Ok(())
 }
