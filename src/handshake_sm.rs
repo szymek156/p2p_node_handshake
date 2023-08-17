@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use anyhow::{anyhow, Context, Result};
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use chacha20poly1305::{
     aead::{Aead, AeadMut, Payload},
     AeadCore, AeadInPlace, ChaCha20Poly1305, KeyInit,
@@ -12,12 +12,21 @@ use crate::crypto_primitives;
 
 // TODO: put it somewhere else
 pub const IPFS_NOISE_PROTOCOL_NAME: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
+
+/// Tag len for ChaChaPoly AEAD
 const TAGLEN: usize = 16;
 
+const DHLEN: usize = 32;
+
+/// Priv and Pub length of Dh25519 curve
+pub type DhKey = [u8; DHLEN];
+
 /// Key len for ChaCha
+// TODO: use secrecy or zeroize for keys
 pub type CipherKey = [u8; 32];
 /// Hash len for SHA256
 pub type HashDigest = [u8; 32];
+
 /// The key k and nonce n are used to encrypt static public keys and handshake payloads.
 pub struct CipherState {
     k: Option<CipherKey>,
@@ -26,6 +35,7 @@ pub struct CipherState {
 
 impl CipherState {
     pub fn initialize_key(k: Option<CipherKey>) -> Self {
+        println!("DEBUG: initialize cipher with {k:?}");
         Self { k, n: 0 }
     }
 
@@ -70,6 +80,10 @@ impl CipherState {
         };
 
         Ok(plaintext)
+    }
+
+    fn has_key(&self) -> bool {
+        self.k.is_some()
     }
 }
 
@@ -118,8 +132,19 @@ impl SymmetricState {
     /// Sets ck, temp_k = HKDF(ck, input_key_material, 2).
     /// If HASHLEN is 64, then truncates temp_k to 32 bytes.
     /// Calls InitializeKey(temp_k).
-    pub fn mix_key(&mut self) {
-        // use hkdf crate from rust crypto??? Or more likely hmac + description from noise
+    pub fn mix_key(&mut self, input_key: &[u8]) -> Result<()> {
+        let mut hasher = crypto_primitives::get_hasher()?;
+
+        let mut ck = HashDigest::default();
+        let mut temp_k = HashDigest::default();
+
+        println!("DEBUG: input key: {input_key:02X?}");
+        hasher.hkdf(&self.ck, input_key, 2, &mut ck, &mut temp_k, &mut []);
+
+        self.cipher_state = CipherState::initialize_key(Some(temp_k));
+        self.ck = ck;
+
+        Ok(())
     }
 
     /// Sets h = HASH(h || data)
@@ -134,25 +159,49 @@ impl SymmetricState {
 
         Ok(())
     }
+
+    #[must_use]
+    pub fn encrypt_and_hash(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let ciphertext = self.cipher_state.encrypt_with_ad(&self.h, plaintext)?;
+
+        self.mix_hash(&ciphertext)?;
+
+        Ok(ciphertext)
+    }
+
+    #[must_use]
+    fn decrypt_and_hash(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        let plaintext = self.cipher_state.decrypt_with_ad(&self.h, ciphertext)?;
+        self.mix_hash(ciphertext)?;
+        Ok(plaintext)
+    }
 }
 
 pub struct HandshakeState {
     symmetric_state: SymmetricState,
     s: Option<Box<dyn Dh>>,
     e: Option<Box<dyn Dh>>,
-    rs: Option<Box<dyn Dh>>,
-    re: Option<Box<dyn Dh>>,
-    message_patterns: VecDeque<VecDeque<MessagePatternToken>>, // TODO: initiator flag
+    rs: Option<DhKey>,
+    re: Option<DhKey>,
+    message_patterns: VecDeque<VecDeque<MessagePatternToken>>,
+    // TODO: initiator flag, or type state?
 }
 
+#[derive(Debug)]
 enum MessagePatternToken {
     E,
     S,
+    DhOp(MessagePatternDhOpToken),
+}
+
+#[derive(Debug)]
+enum MessagePatternDhOpToken {
     EE,
     ES,
     SE,
     SS,
 }
+
 impl HandshakeState {
     // TODO: builder pattern required? Maybe typestate pattern, to enforce s to be set
     pub fn initialize(protocol_name: &str, local_static_priv: &[u8]) -> Result<Self> {
@@ -164,12 +213,16 @@ impl HandshakeState {
             vec![MessagePatternToken::E].into(),
             vec![
                 MessagePatternToken::E,
-                MessagePatternToken::EE,
+                MessagePatternToken::DhOp(MessagePatternDhOpToken::EE),
                 MessagePatternToken::S,
-                MessagePatternToken::ES,
+                MessagePatternToken::DhOp(MessagePatternDhOpToken::ES),
             ]
             .into(),
-            vec![MessagePatternToken::S, MessagePatternToken::SE].into(),
+            vec![
+                MessagePatternToken::S,
+                MessagePatternToken::DhOp(MessagePatternDhOpToken::SE),
+            ]
+            .into(),
         ]
         .into();
 
@@ -178,13 +231,6 @@ impl HandshakeState {
 
         // mixhash empty prologue
         symmetric_state.mix_hash(&[])?;
-
-        // Calls MixHash() once for each public key listed in the pre-messages
-        // from handshake_pattern, with the specified public key as input
-        // TODO: for XX we know only s is set a priori
-
-        // TODO: confirm that happens
-        // symmetric_state.mix_hash(s_dh.pubkey())?;
 
         Ok(Self {
             symmetric_state,
@@ -196,37 +242,176 @@ impl HandshakeState {
         })
     }
 
-    pub fn write_message(&mut self, payload: &[u8], out: &mut [u8]) -> Result<()> {
+    pub fn set_local_ephemeral_for_testing(&mut self, local_ephemeral_priv: &[u8]) -> Result<()> {
+        let mut e_dh = crypto_primitives::get_dh()?;
+        e_dh.set(local_ephemeral_priv);
+        self.e = Some(e_dh);
+
+        Ok(())
+    }
+
+    pub fn write_message(&mut self, payload: &[u8], out: &mut [u8]) -> Result<usize> {
         let Some(current_pattern) = self.message_patterns.pop_front() else {
+            // TODO: If there are no more message patterns returns two new CipherState objects by calling Split().
             return Err(anyhow!("No more message patterns to consume"));
         };
 
+        let mut buf = BytesMut::new();
+
         for token in current_pattern {
+            println!("DEBUG: write, parse {token:?}");
             match token {
                 MessagePatternToken::E => {
-                    if self.e.is_some() {
-                        return Err(anyhow!("Invalid token, 'e' is already set"));
-                    }
-                    let mut e_dh = crypto_primitives::get_dh()?;
-                    e_dh.generate(crypto_primitives::get_rand()?.as_mut());
+                    // if self.e.is_some() {
+                    //     return Err(anyhow!("Invalid token, 'e' is already set"));
+                    // }
 
-                    out.copy_from_slice(e_dh.pubkey());
+                    let e_dh = if let Some(e) = &self.e {
+                        e
+                    } else {
+                        let mut e_dh = crypto_primitives::get_dh()?;
+                        e_dh.generate(crypto_primitives::get_rand()?.as_mut());
+
+
+                        self.e = Some(e_dh);
+                        // TODO: unwrap
+                        self.e.as_ref().unwrap()
+                    };
+
+                    buf.put_slice(e_dh.pubkey());
 
                     self.symmetric_state.mix_hash(e_dh.pubkey())?;
-                    self.e = Some(e_dh);
-                }
-                MessagePatternToken::S => todo!(),
-                MessagePatternToken::EE => todo!(),
-                MessagePatternToken::ES => todo!(),
-                MessagePatternToken::SE => todo!(),
-                MessagePatternToken::SS => todo!(),
-            }
 
-            // TODO: check is k is set, encrypt using aead, add h as aad?
-            // Appends EncryptAndHash(payload) to the buffer.
-            out.copy_from_slice(payload);
+                }
+                MessagePatternToken::S => {
+                    let Some(s) = &self.s else {
+                        return Err(anyhow!("While parsing 's' there is no static key defined"))
+                    };
+
+                    let encrypted_s = self.symmetric_state.encrypt_and_hash(s.pubkey())?;
+                    buf.put_slice(&encrypted_s);
+                }
+                MessagePatternToken::DhOp(dh_operation) => self.handle_dh_exchange(dh_operation)?,
+            }
         }
 
+        // Appends EncryptAndHash(payload) to the buffer.
+        let ct_payload = self.symmetric_state.encrypt_and_hash(payload)?;
+        buf.put_slice(&ct_payload);
+
+        out[..buf.len()].copy_from_slice(&buf);
+
+        Ok(buf.len())
+    }
+
+    pub fn read_message(&mut self, input: &[u8], payload: &mut [u8]) -> Result<usize> {
+        let Some(current_pattern) = self.message_patterns.pop_front() else {
+            // TODO: If there are no more message patterns returns two new CipherState objects by calling Split().
+            return Err(anyhow!("No more message patterns to consume"));
+        };
+
+        let mut offset = 0;
+
+        for token in current_pattern {
+            println!("DEBUG: read, parse {token:?}");
+            match token {
+                MessagePatternToken::E => {
+                    if self.re.is_some() {
+                        return Err(anyhow!("Invalid token, 're' is already set"));
+                    }
+
+                    let mut re_pub = DhKey::default();
+                    // TODO: might panic
+                    re_pub.copy_from_slice(&input[offset..(offset + DHLEN)]);
+                    // TODO: use Bytes?
+                    offset += DHLEN;
+
+                    self.symmetric_state.mix_hash(&re_pub)?;
+
+                    self.re = Some(re_pub)
+                }
+                MessagePatternToken::S => {
+                    if self.rs.is_some() {
+                        return Err(anyhow!("Invalid token, 'rs' is already set"));
+                    }
+
+                    let ct_len = if self.symmetric_state.cipher_state.has_key() {
+                        // Message is encrypted with a tag
+                        DHLEN + TAGLEN
+                    } else {
+                        // No key set yet
+                        DHLEN
+                    };
+
+                    // TODO: that doesn't have to be heap allocated
+                    // TODO: introduce zeroize type for such things
+                    let mut ciphertext = vec![0u8; ct_len];
+                    ciphertext.copy_from_slice(&input[offset..(offset + ct_len)]);
+                    offset += ct_len;
+
+                    let plaintext = self.symmetric_state.decrypt_and_hash(&ciphertext)?;
+
+                    let mut rs_pub = DhKey::default();
+                    rs_pub.copy_from_slice(&plaintext[..DHLEN]);
+
+                    self.rs = Some(rs_pub);
+                }
+                MessagePatternToken::DhOp(dh_operation) => {
+                    self.handle_dh_exchange(dh_operation)?;
+                }
+            }
+        }
+
+        // Calls DecryptAndHash() on the remaining bytes of the message and stores the output into payload_buffer.
+        let remaining = &input[offset..];
+
+        let plaintext = self.symmetric_state.decrypt_and_hash(remaining)?;
+
+        payload[..plaintext.len()].copy_from_slice(&plaintext);
+        Ok(plaintext.len())
+    }
+
+    fn handle_dh_exchange(
+        &mut self,
+        dh_operation: MessagePatternDhOpToken,
+    ) -> Result<(), anyhow::Error> {
+        let (dh, pub_key) = match dh_operation {
+            MessagePatternDhOpToken::EE => {
+                let (Some(e), Some(re)) = (&self.e, &self.re) else {
+                    return Err(anyhow!("While parsing 'ee', e or re is missing"));
+                };
+
+                (e, re)
+            }
+            MessagePatternDhOpToken::ES => {
+                let (Some(e), Some(rs)) = (&self.e, &self.rs) else {
+                    return Err(anyhow!("While parsing 'es', e or rs is missing"));
+                };
+
+                (e, rs)
+            }
+            MessagePatternDhOpToken::SE => {
+                let (Some(s), Some(re)) = (&self.s, &self.re) else {
+                    return Err(anyhow!("While parsing 'se', s or re is missing"));
+                };
+
+                (s, re)
+            }
+            MessagePatternDhOpToken::SS => {
+                let (Some(s), Some(rs)) = (&self.s, &self.rs) else {
+                    return Err(anyhow!("While parsing 'ss', s or rs is missing"));
+                };
+
+                (s, rs)
+            }
+        };
+        let mut dh_exchange = DhKey::default();
+        dh.dh(pub_key, &mut dh_exchange)?;
+        self.symmetric_state.mix_key(&dh_exchange)?;
         Ok(())
+    }
+
+    pub(crate) fn get_remote_static(&self) -> Option<&DhKey> {
+        self.rs.as_ref()
     }
 }
