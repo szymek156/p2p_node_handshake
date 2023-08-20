@@ -10,13 +10,16 @@ use snow::types::Dh;
 
 use crate::crypto_primitives;
 
-// TODO: put it somewhere else
-pub const IPFS_NOISE_PROTOCOL_NAME: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
+use super::IPFS_NOISE_PROTOCOL_NAME;
 
 /// Tag len for ChaChaPoly AEAD
 const TAGLEN: usize = 16;
 
+/// Len of DH keys
 const DHLEN: usize = 32;
+
+/// Len of the hash digest
+const HASHLEN: usize = 32;
 
 /// Priv and Pub length of Dh25519 curve
 pub type DhKey = [u8; DHLEN];
@@ -25,7 +28,7 @@ pub type DhKey = [u8; DHLEN];
 // TODO: use secrecy or zeroize for keys
 pub type CipherKey = [u8; 32];
 /// Hash len for SHA256
-pub type HashDigest = [u8; 32];
+pub type HashDigest = [u8; HASHLEN];
 
 /// The key k and nonce n are used to encrypt static public keys and handshake payloads.
 pub struct CipherState {
