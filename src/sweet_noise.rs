@@ -1,11 +1,12 @@
 //! Minimal implementation of noise protocol handshake
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::{Buf, BufMut, BytesMut};
+use log::{debug, info};
 use prost::Message;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    pin,
+    net::TcpStream,
 };
 
 use crate::messages;
@@ -17,63 +18,58 @@ pub const IPFS_NOISE_PROTOCOL_NAME: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
 /// Tag len for ChaChaPoly AEAD
 const TAGLEN: usize = 16;
 
-/// Len of DH keys
+/// Len of DH priv and pub keys
 const DHLEN: usize = 32;
 
 /// Len of the hash digest
 const HASHLEN: usize = 32;
 
-/// Priv and Pub length of Dh25519 curve
+/// Max length of one noise message
+const MSGLEN: usize = 65535;
+
+/// Priv and Pub key type of Dh25519 curve
 pub type DhKey = [u8; DHLEN];
 
-/// Key len for ChaCha
+/// Key type for ChaCha
 // TODO: use secrecy or zeroize for keys
 pub type CipherKey = [u8; 32];
-/// Hash len for SHA256
+/// Hash digest type for SHA256
 pub type HashDigest = [u8; HASHLEN];
 
+trait AsyncGenericResponder: tokio::io::AsyncRead + tokio::io::AsyncWrite + std::marker::Unpin {}
+
+impl AsyncGenericResponder for tokio::net::TcpStream {}
+
 /// Establish secure connection using noise protocol handshake
-pub async fn handshake<T>(
-    connection: &mut T,
+pub async fn execute_handshake(
+    connection: &mut TcpStream,
+    static_keypair: &snow::Keypair,
+) -> Result<()> {
+    handshake(connection, static_keypair, None).await
+}
+
+async fn handshake(
+    connection: &mut impl AsyncGenericResponder,
     static_keypair: &snow::Keypair,
     ephemeral_keypair: Option<&snow::Keypair>,
-) -> Result<()>
-where
-    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + std::marker::Unpin,
-{
-    pin! {
-        connection
-    };
-
-    println!("MINE handshake begin");
+) -> Result<()> {
+    info!("Noise handshake begins...");
 
     let mut initiator =
         handshake_sm::HandshakeState::initialize(IPFS_NOISE_PROTOCOL_NAME, &static_keypair.private)
-            .unwrap();
+            .context("while initializing handshake SM")?;
 
     if let Some(e) = ephemeral_keypair {
         initiator.set_local_ephemeral_for_testing(&e.private)?;
     }
 
-    // e
-    println!("-> e");
-    let mut buf = vec![0u8; 65535];
-    let len = initiator.write_message(&[], &mut buf).unwrap();
-
-    println!("LEN: {len}");
-    let mut finalbuf = BytesMut::new();
-    finalbuf.put_u16(len as u16);
-    finalbuf.put_slice(&buf[..len]);
-    connection.write_all(&finalbuf).await.unwrap();
+    // -> e
+    write_stage_1(&mut initiator, connection).await?;
 
     let mut rcv_buf = BytesMut::zeroed(65535);
-    let rcv = connection.read(&mut rcv_buf).await?;
-    println!("read {rcv} bytes");
-    rcv_buf.resize(rcv, 0);
-    let len = rcv_buf.get_u16();
-    println!("len in payload {len} bytes");
+    read_stage_1(connection, &mut rcv_buf).await?;
 
-    // e, ee, s, es
+    // <- e, ee, s, es
     println!("-> e, ee, s, es");
     let mut raw_payload = BytesMut::zeroed(65535);
     let payload_len = initiator
@@ -146,6 +142,38 @@ where
     Ok(())
 }
 
+async fn read_stage_1(
+    connection: &mut impl AsyncGenericResponder,
+    rcv_buf: &mut BytesMut,
+) -> Result<()> {
+    let rcv = connection.read(rcv_buf).await?;
+    println!("read {rcv} bytes");
+    rcv_buf.resize(rcv, 0);
+    let len = rcv_buf.get_u16();
+    println!("len in payload {len} bytes");
+
+    Ok(())
+}
+
+async fn write_stage_1(
+    initiator: &mut handshake_sm::HandshakeState,
+    connection: &mut impl AsyncGenericResponder,
+) -> Result<()> {
+    debug!("-> e");
+    let mut buf = vec![0u8; MSGLEN];
+    let len = initiator
+        .write_message(&[], &mut buf)
+        .context("while writing the message in the SM")?;
+    debug!("written: {len} bytes to SM");
+
+    let mut finalbuf = BytesMut::new();
+    finalbuf.put_u16(len as u16);
+    finalbuf.put_slice(&buf[..len]);
+    connection.write_all(&finalbuf).await.unwrap();
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::task::Poll;
@@ -199,6 +227,7 @@ mod tests {
                 write_buffers: vec![
                     // -> e
                     ephemeral_key.public.clone(),
+                    // TODO: add last steps
                 ],
                 static_key: snow::Keypair {
                     private: vec![
@@ -231,6 +260,8 @@ mod tests {
         }
     }
 
+    impl AsyncGenericResponder for FakeResponder {}
+
     const IPFS_HEADER_LEN: usize = 2;
 
     impl tokio::io::AsyncRead for FakeResponder {
@@ -247,7 +278,6 @@ mod tests {
                 .copy_from_slice(result);
             self.current_read += 1;
 
-            // Ok(result.len() + IPFS_HEADER_LEN)
             Poll::Ready(Ok(()))
         }
     }

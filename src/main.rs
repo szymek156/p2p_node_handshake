@@ -34,7 +34,7 @@ async fn connect_to_ipfs_node(connection: &mut TcpStream) -> Result<()> {
     let static_key = generate_keypair()?;
     // let ephemeral_key = generate_keypair()?;
 
-    sweet_noise::handshake(connection, &static_key, None).await?;
+    sweet_noise::execute_handshake(connection, &static_key).await?;
 
     Ok(())
 }
