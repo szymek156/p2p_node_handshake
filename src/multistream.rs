@@ -77,7 +77,7 @@ async fn write_message(connection: &mut TcpStream, protocol_name: &str) -> Resul
 
     let mut out = BytesMut::with_capacity(msg_len + 1);
     out.put_u8(msg_len as u8);
-    out.put_slice(&protocol_name.as_bytes());
+    out.put_slice(protocol_name.as_bytes());
     out.put_bytes(b'\n', 1);
 
     connection.write_all(&out).await?;

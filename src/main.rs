@@ -2,15 +2,12 @@ mod multistream;
 mod qnd_sync;
 mod sweet_noise;
 
-use anyhow::{anyhow, Context, Result};
-use bytes::{Buf, BufMut, BytesMut};
-use log::{debug, info};
-use prost::Message;
+use anyhow::Result;
+
+use log::info;
+
 use sweet_noise::crypto_primitives;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::net::TcpStream;
 
 pub mod messages {
     include!(concat!(env!("OUT_DIR"), "/bep.protobufs.rs"));

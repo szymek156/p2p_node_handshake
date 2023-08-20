@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
 
-use anyhow::{anyhow, Context, Result};
-use bytes::{BufMut, Bytes, BytesMut};
+use anyhow::{anyhow, Result};
+use bytes::{BufMut, BytesMut};
 use chacha20poly1305::{
-    aead::{Aead, AeadMut, Payload},
-    AeadCore, AeadInPlace, ChaCha20Poly1305, KeyInit,
+    aead::{Aead, AeadMut},
+    KeyInit,
 };
 use snow::types::Dh;
 
@@ -107,7 +107,7 @@ impl SymmetricState {
             hasher.result(&mut h);
         }
 
-        let ck = h.clone();
+        let ck = h;
 
         Ok(Self {
             cipher_state: CipherState::initialize_key(None),

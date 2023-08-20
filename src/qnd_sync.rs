@@ -145,10 +145,7 @@ where
     to_verify.put_slice("noise-libp2p-static-key:".as_bytes());
     to_verify.put_slice(rs);
 
-    assert_eq!(
-        responder_key.verify(&to_verify, payload.identity_sig()),
-        true
-    );
+    assert!(responder_key.verify(&to_verify, payload.identity_sig()));
 
     println!("preparing the payload");
     let id_keypair = libp2p::identity::ed25519::Keypair::generate();
@@ -189,7 +186,7 @@ where
     let len = rcv_buf.get_u16();
     println!("len in payload {len} bytes");
 
-    let mut noise = initiator.into_transport_mode().unwrap();
+    let _noise = initiator.into_transport_mode().unwrap();
     println!("session established!");
 
     Ok(())
@@ -256,10 +253,7 @@ where
     to_verify.put_slice("noise-libp2p-static-key:".as_bytes());
     to_verify.put_slice(rs);
 
-    assert_eq!(
-        responder_key.verify(&to_verify, payload.identity_sig()),
-        true
-    );
+    assert!(responder_key.verify(&to_verify, payload.identity_sig()));
 
     println!("preparing the payload");
     let id_keypair = libp2p::identity::ed25519::Keypair::generate();
@@ -313,7 +307,7 @@ fn write_msg(stream: &mut TcpStream, arg: &str) -> Result<()> {
 
     let msg = format!("{arg}\n");
     out.put_u8(msg.len() as u8);
-    out.put_slice(&msg.as_bytes());
+    out.put_slice(msg.as_bytes());
     stream.write_all(&out)?;
 
     Ok(())

@@ -1,11 +1,10 @@
 //! Minimal implementation of noise protocol handshake
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use bytes::{Buf, BufMut, BytesMut};
 use prost::Message;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
     pin,
 };
 
@@ -99,10 +98,7 @@ where
     to_verify.put_slice("noise-libp2p-static-key:".as_bytes());
     to_verify.put_slice(rs);
 
-    assert_eq!(
-        responder_key.verify(&to_verify, payload.identity_sig()),
-        true
-    );
+    assert!(responder_key.verify(&to_verify, payload.identity_sig()));
 
     println!("preparing the payload");
     let id_keypair = libp2p::identity::ed25519::Keypair::generate();
