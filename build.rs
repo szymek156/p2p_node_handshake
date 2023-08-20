@@ -1,4 +1,3 @@
-
 use prost_build;
 
 fn main() {

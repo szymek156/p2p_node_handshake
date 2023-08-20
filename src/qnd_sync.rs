@@ -1,17 +1,15 @@
-
 use std::io::prelude::*;
 use std::net::TcpStream;
 
 use anyhow::Result;
 use bytes::{Buf, BufMut, BytesMut};
 
-use libp2p::identity::ed25519::Keypair;
 use prost::Message;
-use snow::{params::CipherChoice, resolvers::CryptoResolver};
 
-use crate::{handshake_sm::{IPFS_NOISE_PROTOCOL_NAME, self}, messages, crypto_primitives};
-
-
+use crate::{
+    crypto_primitives, messages,
+    sweet_noise::{handshake_sm, IPFS_NOISE_PROTOCOL_NAME},
+};
 
 pub fn test_connection() -> Result<()> {
     let mut stream = TcpStream::connect("172.17.0.1:4001")?;

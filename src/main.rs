@@ -1,11 +1,12 @@
-mod sweet_noise;
-mod qnd_sync;
 mod multistream;
+mod qnd_sync;
+mod sweet_noise;
 
 use anyhow::{anyhow, Context, Result};
 use bytes::{Buf, BufMut, BytesMut};
 use log::{debug, info};
 use prost::Message;
+use sweet_noise::crypto_primitives;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -32,13 +33,24 @@ async fn main() -> Result<()> {
 
 async fn connect_to_ipfs_node(connection: &mut TcpStream) -> Result<()> {
     multistream::negotiate_noise_protocol(connection).await?;
-    noise_handshake(connection).await?;
+
+    let static_key = generate_keypair()?;
+    // let ephemeral_key = generate_keypair()?;
+
+    sweet_noise::handshake(connection, &static_key, None).await?;
 
     Ok(())
 }
 
+fn generate_keypair() -> Result<snow::Keypair> {
+    let mut rng = crypto_primitives::get_rand()?;
+    let mut dh = crypto_primitives::get_dh()?;
+    let mut private = vec![0u8; dh.priv_len()];
+    let mut public = vec![0u8; dh.pub_len()];
+    dh.generate(&mut *rng);
 
-/// Establish secure connection using noise protocol handshake
-async fn noise_handshake(connection: &mut TcpStream) -> Result<()> {
-    todo!()
+    private.copy_from_slice(dh.privkey());
+    public.copy_from_slice(dh.pubkey());
+
+    Ok(snow::Keypair { private, public })
 }

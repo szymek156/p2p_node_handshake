@@ -8,27 +8,11 @@ use chacha20poly1305::{
 };
 use snow::types::Dh;
 
-use crate::crypto_primitives;
+use crate::sweet_noise::DHLEN;
+
+use super::{crypto_primitives, CipherKey, DhKey, HashDigest, TAGLEN};
 
 use super::IPFS_NOISE_PROTOCOL_NAME;
-
-/// Tag len for ChaChaPoly AEAD
-const TAGLEN: usize = 16;
-
-/// Len of DH keys
-const DHLEN: usize = 32;
-
-/// Len of the hash digest
-const HASHLEN: usize = 32;
-
-/// Priv and Pub length of Dh25519 curve
-pub type DhKey = [u8; DHLEN];
-
-/// Key len for ChaCha
-// TODO: use secrecy or zeroize for keys
-pub type CipherKey = [u8; 32];
-/// Hash len for SHA256
-pub type HashDigest = [u8; HASHLEN];
 
 /// The key k and nonce n are used to encrypt static public keys and handshake payloads.
 pub struct CipherState {
@@ -275,7 +259,6 @@ impl HandshakeState {
                         let mut e_dh = crypto_primitives::get_dh()?;
                         e_dh.generate(crypto_primitives::get_rand()?.as_mut());
 
-
                         self.e = Some(e_dh);
                         // TODO: unwrap
                         self.e.as_ref().unwrap()
@@ -284,7 +267,6 @@ impl HandshakeState {
                     buf.put_slice(e_dh.pubkey());
 
                     self.symmetric_state.mix_hash(e_dh.pubkey())?;
-
                 }
                 MessagePatternToken::S => {
                     let Some(s) = &self.s else {
