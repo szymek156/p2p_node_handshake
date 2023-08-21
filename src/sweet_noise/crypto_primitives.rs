@@ -11,6 +11,7 @@ use snow::{
 use super::CipherKey;
 
 pub fn get_cipher_with_key(k: &CipherKey) -> Result<Box<dyn Cipher>> {
+
     let mut cipher = DefaultResolver
         .resolve_cipher(&CipherChoice::ChaChaPoly)
         .ok_or(anyhow!("Cannot resolve cipher"))?;

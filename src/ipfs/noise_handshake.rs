@@ -1,4 +1,5 @@
 //! Implementation of noise protocol handshake used in IPFS
+//! Uses typestate pattern to avoid misuse
 
 use crate::sweet_noise::{handshake_sm, IPFS_NOISE_PROTOCOL_NAME, MSGLEN};
 use anyhow::{anyhow, Context, Result};
@@ -36,6 +37,8 @@ impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake1<'conn, T> {
         connection: &'conn mut T,
         static_keypair: &snow::Keypair,
     ) -> Result<IpfsNoiseHandshake1<'conn, T>> {
+        // IPFS message is prefixed with u16 containing length
+        // https://github.com/libp2p/specs/blob/master/noise/README.md#wire-format
         let transport = LengthDelimitedCodec::builder()
             .length_field_type::<u16>()
             .max_frame_length(MSGLEN)
@@ -54,29 +57,20 @@ impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake1<'conn, T> {
     }
 
     #[cfg(test)]
-    pub async fn new_for_test(
+    async fn new_for_test(
         connection: &'conn mut T,
         static_keypair: &snow::Keypair,
         ephemeral_keypair: &snow::Keypair,
     ) -> Result<IpfsNoiseHandshake1<'conn, T>> {
-        let mut initiator = handshake_sm::HandshakeState::initialize(
-            IPFS_NOISE_PROTOCOL_NAME,
-            &static_keypair.private,
-        )
-        .context("while initializing handshake SM")?;
+        let mut new = Self::new(connection, static_keypair).await?;
 
-        initiator.set_local_ephemeral_for_testing(&ephemeral_keypair.private)?;
+        new.initiator
+            .set_local_ephemeral_for_testing(&ephemeral_keypair.private)?;
 
-        let transport = LengthDelimitedCodec::builder()
-            .length_field_type::<u16>()
-            .new_framed(connection);
-
-        Ok(Self {
-            initiator,
-            transport,
-        })
+        Ok(new)
     }
 
+    /// Sends ephemeral key over the wire and returns second state
     pub async fn send_e(mut self) -> Result<IpfsNoiseHandshake2<'conn, T>> {
         debug!("-> e");
         let mut noise_message = BytesMut::zeroed(MSGLEN);
@@ -87,7 +81,6 @@ impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake1<'conn, T> {
 
         noise_message.resize(len, 0u8);
         self.transport.send(noise_message.freeze()).await?;
-
 
         Ok(IpfsNoiseHandshake2 {
             initiator: self.initiator,
@@ -347,11 +340,8 @@ mod tests {
             let ipfs_header = result.len() as u16;
             buf.clear();
 
-            buf.initialized_mut()[..IPFS_HEADER_LEN].copy_from_slice(&ipfs_header.to_be_bytes());
-            buf.initialized_mut()[IPFS_HEADER_LEN..(IPFS_HEADER_LEN + result.len())]
-                .copy_from_slice(result);
-
-            buf.set_filled(IPFS_HEADER_LEN + result.len());
+            buf.put_slice(&ipfs_header.to_be_bytes());
+            buf.put_slice(&result);
 
             self.current_read += 1;
 

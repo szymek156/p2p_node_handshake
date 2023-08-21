@@ -2,10 +2,6 @@ use std::collections::VecDeque;
 
 use anyhow::{anyhow, Result};
 use bytes::{BufMut, BytesMut};
-use chacha20poly1305::{
-    aead::{Aead, AeadMut},
-    KeyInit,
-};
 use snow::types::Dh;
 
 use crate::sweet_noise::DHLEN;
@@ -229,6 +225,7 @@ impl HandshakeState {
         })
     }
 
+    #[cfg(test)]
     pub fn set_local_ephemeral_for_testing(&mut self, local_ephemeral_priv: &[u8]) -> Result<()> {
         let mut e_dh = crypto_primitives::get_dh()?;
         e_dh.set(local_ephemeral_priv);

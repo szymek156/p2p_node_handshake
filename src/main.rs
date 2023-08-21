@@ -1,5 +1,4 @@
 mod ipfs;
-mod qnd_sync;
 mod sweet_noise;
 
 use anyhow::Result;
@@ -7,8 +6,6 @@ use anyhow::Result;
 use log::info;
 
 use tokio::net::TcpStream;
-
-use crate::qnd_sync::test_connection;
 
 #[tokio::main]
 async fn main() -> Result<()> {
