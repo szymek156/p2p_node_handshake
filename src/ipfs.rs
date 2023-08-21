@@ -1,27 +1,32 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use bytes::{Buf, BufMut, BytesMut};
-use log::debug;
+use log::{debug, info};
 use prost::Message;
 use snow::Keypair;
 use tokio::{io::AsyncReadExt, net::TcpStream};
 
-use crate::{
-    messages::{self, NoiseHandshakePayload},
-    sweet_noise::generate_keypair,
-};
+use crate::sweet_noise::generate_keypair;
 
-use self::noise_handshake::IpfsNoiseHandshake1;
+use self::noise_handshake::{
+    messages::{self, NoiseHandshakePayload},
+    IpfsNoiseHandshake1,
+};
 mod multistream;
 pub mod noise_handshake;
 
+/// Connects to IPFS node, negotiates the noise protocol and follows the handshake
 pub async fn connect_to_node(connection: &mut TcpStream) -> Result<()> {
-    multistream::negotiate_noise_protocol(connection).await?;
+    multistream::negotiate_noise_protocol(connection)
+        .await
+        .context("while negotiating noise protocol")?;
 
     let static_keypair = generate_keypair()?;
+    let id_keypair = libp2p::identity::ed25519::Keypair::generate();
 
-    let handshake = IpfsNoiseHandshake1::new(connection, &static_keypair, None).await?;
+    let handshake = IpfsNoiseHandshake1::new(connection, &static_keypair).await?;
 
     let handshake = handshake.send_e().await.context("while sending e")?;
+
     let (remote_payload, handshake) = handshake
         .process_response()
         .await
@@ -29,8 +34,9 @@ pub async fn connect_to_node(connection: &mut TcpStream) -> Result<()> {
 
     debug!("Got payload: {remote_payload:?}");
 
-    let local_payload =
-        create_payload(&static_keypair).context("while preparing the payload to send")?;
+    let local_payload = create_payload(&static_keypair, &id_keypair)
+        .context("while preparing the payload to send")?;
+
     handshake
         .send_s(local_payload)
         .await
@@ -44,15 +50,17 @@ pub async fn connect_to_node(connection: &mut TcpStream) -> Result<()> {
     let len = rcv_buf.get_u16();
     println!("len in payload {len} bytes");
 
-    println!("session established!");
+    info!("session established!");
 
     Ok(())
 }
 
-fn create_payload(static_keypair: &Keypair) -> Result<NoiseHandshakePayload> {
+/// Creates a payload that is expected to be send at "-> s, se" stage of the handshake
+pub fn create_payload(
+    static_keypair: &Keypair,
+    id_keypair: &libp2p::identity::ed25519::Keypair,
+) -> Result<NoiseHandshakePayload> {
     let mut payload = NoiseHandshakePayload::default();
-
-    let id_keypair = libp2p::identity::ed25519::Keypair::generate();
 
     let mut to_sign = BytesMut::new();
     to_sign.put_slice("noise-libp2p-static-key:".as_bytes());

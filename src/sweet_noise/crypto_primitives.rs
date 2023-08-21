@@ -1,3 +1,6 @@
+//! Abstraction layer for creating crypto primitives.
+//! For simplicity crypto primitives are resolved currently
+//! with use of snow crate.
 use anyhow::{anyhow, Result};
 use snow::{
     params::{CipherChoice, DHChoice, HashChoice},

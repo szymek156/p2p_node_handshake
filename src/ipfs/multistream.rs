@@ -11,6 +11,8 @@ use tokio::{
 const NOT_SUPPORTED: &str = "na";
 const MULTISTREAM_PROTOCOL: &str = "/multistream/1.0.0";
 const NOISE_PROTOCOL: &str = "/noise";
+// TODO: add trait for tcpstream, MultistreamResponder that does the message framing
+// add tests
 
 /// Use multiselect stream protocol to agree on noise protocol selection
 pub async fn negotiate_noise_protocol(connection: &mut TcpStream) -> Result<()> {

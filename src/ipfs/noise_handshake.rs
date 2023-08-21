@@ -2,19 +2,17 @@
 
 use anyhow::{anyhow, Context, Result};
 use bytes::{Buf, BufMut, BytesMut};
-use log::{debug, info};
+use log::debug;
 use prost::Message;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{
-    messages::{self, NoiseHandshakePayload},
-    sweet_noise::{handshake_sm, IPFS_NOISE_PROTOCOL_NAME, MSGLEN},
-};
+use crate::sweet_noise::{handshake_sm, IPFS_NOISE_PROTOCOL_NAME, MSGLEN};
 
-use self::handshake_sm::HandshakeState;
+use self::{handshake_sm::HandshakeState, messages::NoiseHandshakePayload};
+
+pub mod messages {
+    include!(concat!(env!("OUT_DIR"), "/bep.protobufs.rs"));
+}
 
 pub trait AsyncGenericResponder:
     tokio::io::AsyncRead + tokio::io::AsyncWrite + std::marker::Unpin
@@ -25,26 +23,22 @@ impl AsyncGenericResponder for tokio::net::TcpStream {}
 
 /// Allows to establish secure connection to the IPFS node using noise protocol
 /// Technical details: https://github.com/libp2p/specs/blob/master/noise/README.md
-pub struct IpfsNoiseHandshake1<'a, T: AsyncGenericResponder> {
+pub struct IpfsNoiseHandshake1<'conn, T: AsyncGenericResponder> {
     initiator: HandshakeState,
-    connection: &'a mut T,
+    connection: &'conn mut T,
 }
 
-impl<'a, T: AsyncGenericResponder> IpfsNoiseHandshake1<'a, T> {
+/// Implements first stage of the handshake: -> e
+impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake1<'conn, T> {
     pub async fn new(
-        connection: &'a mut T,
+        connection: &'conn mut T,
         static_keypair: &snow::Keypair,
-        ephemeral_keypair: Option<&snow::Keypair>,
-    ) -> Result<IpfsNoiseHandshake1<'a, T>> {
-        let mut initiator = handshake_sm::HandshakeState::initialize(
+    ) -> Result<IpfsNoiseHandshake1<'conn, T>> {
+        let initiator = handshake_sm::HandshakeState::initialize(
             IPFS_NOISE_PROTOCOL_NAME,
             &static_keypair.private,
         )
         .context("while initializing handshake SM")?;
-
-        if let Some(e) = ephemeral_keypair {
-            initiator.set_local_ephemeral_for_testing(&e.private)?;
-        }
 
         Ok(Self {
             initiator,
@@ -52,7 +46,27 @@ impl<'a, T: AsyncGenericResponder> IpfsNoiseHandshake1<'a, T> {
         })
     }
 
-    pub async fn send_e(mut self) -> Result<IpfsNoiseHandshake2<'a, T>> {
+    #[cfg(test)]
+    pub async fn new_for_test(
+        connection: &'conn mut T,
+        static_keypair: &snow::Keypair,
+        ephemeral_keypair: &snow::Keypair,
+    ) -> Result<IpfsNoiseHandshake1<'conn, T>> {
+        let mut initiator = handshake_sm::HandshakeState::initialize(
+            IPFS_NOISE_PROTOCOL_NAME,
+            &static_keypair.private,
+        )
+        .context("while initializing handshake SM")?;
+
+        initiator.set_local_ephemeral_for_testing(&ephemeral_keypair.private)?;
+
+        Ok(Self {
+            initiator,
+            connection,
+        })
+    }
+
+    pub async fn send_e(mut self) -> Result<IpfsNoiseHandshake2<'conn, T>> {
         debug!("-> e");
         let mut noise_message = vec![0u8; MSGLEN];
         let len = self
@@ -69,44 +83,36 @@ impl<'a, T: AsyncGenericResponder> IpfsNoiseHandshake1<'a, T> {
     }
 }
 
-async fn send_ipfs_message<T: AsyncGenericResponder>(
-    connection: &mut T,
-    payload: &[u8],
-) -> Result<()> {
-    let mut finalbuf = BytesMut::new();
-    finalbuf.put_u16(payload.len() as u16);
-    finalbuf.put_slice(&payload);
-    connection.write_all(&finalbuf).await?;
-
-    Ok(())
-}
-
-pub struct IpfsNoiseHandshake2<'a, T: AsyncGenericResponder> {
+/// Implements second stage of the handshake: <- e, ee, s, es
+/// Handles receiving and processing the response: deriving keys, validating payload.
+pub struct IpfsNoiseHandshake2<'conn, T: AsyncGenericResponder> {
     initiator: HandshakeState,
-    connection: &'a mut T,
+    connection: &'conn mut T,
 }
 
-impl<'a, T: AsyncGenericResponder> IpfsNoiseHandshake2<'a, T> {
+impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake2<'conn, T> {
     pub async fn process_response(
         mut self,
-    ) -> Result<(NoiseHandshakePayload, IpfsNoiseHandshake3<'a, T>)> {
+    ) -> Result<(NoiseHandshakePayload, IpfsNoiseHandshake3<'conn, T>)> {
         debug!("<- e, ee, s, es");
 
-        let mut rcv_buf = BytesMut::zeroed(65535);
+        let mut rcv_buf = BytesMut::zeroed(MSGLEN);
+        // TODO: fragmentation
         let rcv = self.connection.read(&mut rcv_buf).await?;
-        debug!("read {rcv} bytes");
+        debug!("<- read {rcv}");
         rcv_buf.resize(rcv, 0);
         let len = rcv_buf.get_u16();
-        debug!("len in payload {len} bytes");
 
-        let mut raw_payload = BytesMut::zeroed(65535);
+        let mut raw_payload = BytesMut::zeroed(MSGLEN);
+        debug!("<- read message");
         let payload_len = self
             .initiator
             .read_message(&mut rcv_buf, &mut raw_payload)
-            .unwrap();
+            .context("while processing the response in 2nd stage")?;
 
         raw_payload.resize(payload_len, 0);
 
+        debug!("<- decode payload");
         let payload = self.decode_payload(&mut raw_payload)?;
 
         Ok((
@@ -134,7 +140,8 @@ impl<'a, T: AsyncGenericResponder> IpfsNoiseHandshake2<'a, T> {
         }
 
         let responder_key =
-            libp2p::identity::ed25519::PublicKey::try_from_bytes(&responder_key.data).unwrap();
+            libp2p::identity::ed25519::PublicKey::try_from_bytes(&responder_key.data)
+                .context("While converting responder key")?;
 
         let rs = self
             .initiator
@@ -151,23 +158,27 @@ impl<'a, T: AsyncGenericResponder> IpfsNoiseHandshake2<'a, T> {
     }
 }
 
-pub struct IpfsNoiseHandshake3<'a, T: AsyncGenericResponder> {
+/// Implements third stage of the handshake: -> s, se
+pub struct IpfsNoiseHandshake3<'conn, T: AsyncGenericResponder> {
     initiator: HandshakeState,
-    connection: &'a mut T,
+    connection: &'conn mut T,
 }
 
-impl<'a, T: AsyncGenericResponder> IpfsNoiseHandshake3<'a, T> {
+impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake3<'conn, T> {
     pub async fn send_s(mut self, payload: messages::NoiseHandshakePayload) -> Result<()> {
         debug!("-> s, se");
 
-        let mut buf = vec![0u8; MSGLEN];
+        let mut buf = BytesMut::zeroed(MSGLEN);
         let mut raw_payload = BytesMut::new();
-        payload.encode(&mut raw_payload).unwrap();
+
+        payload
+            .encode(&mut raw_payload)
+            .context("While encoding the payload to send")?;
 
         let len = self
             .initiator
             .write_message(&raw_payload, &mut buf)
-            .unwrap();
+            .context("While processing 3rd stage of the handshake")?;
 
         send_ipfs_message(self.connection, &buf[..len]).await?;
 
@@ -176,89 +187,152 @@ impl<'a, T: AsyncGenericResponder> IpfsNoiseHandshake3<'a, T> {
     }
 }
 
+async fn send_ipfs_message<T: AsyncGenericResponder>(
+    connection: &mut T,
+    payload: &[u8],
+) -> Result<()> {
+    let mut finalbuf = BytesMut::new();
+    finalbuf.put_u16(payload.len() as u16);
+    finalbuf.put_slice(payload);
+    connection.write_all(&finalbuf).await?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::task::Poll;
+
+    use chacha20poly1305::aead::Payload;
+
+    use crate::ipfs::create_payload;
 
     use super::*;
     /// Contains dump of one of successful session messages
     struct FakeResponder {
         read_buffers: Vec<Vec<u8>>,
         write_buffers: Vec<Vec<u8>>,
-        static_key: snow::Keypair,
-        ephemeral_key: snow::Keypair,
+        static_keypair: snow::Keypair,
+        ephemeral_keypair: snow::Keypair,
+        id_keypair: libp2p::identity::ed25519::Keypair,
+        decrypted_responder_payload: Vec<u8>,
         current_read: usize,
         current_write: usize,
     }
 
     impl FakeResponder {
         pub fn new() -> Self {
-            let ephemeral_key = snow::Keypair {
+            let ephemeral_keypair = snow::Keypair {
                 private: vec![
                     24, 81, 254, 143, 214, 216, 196, 80, 30, 226, 186, 135, 208, 66, 139, 62, 4,
                     138, 22, 254, 41, 245, 43, 18, 131, 209, 152, 111, 150, 83, 144, 88,
                 ],
-
                 public: vec![
                     158, 85, 192, 115, 248, 205, 14, 23, 48, 114, 234, 254, 251, 79, 230, 232, 54,
                     58, 130, 146, 243, 104, 40, 48, 77, 172, 249, 44, 215, 213, 74, 32,
                 ],
             };
 
+            let static_keypair = snow::Keypair {
+                private: vec![
+                    168, 52, 148, 164, 50, 146, 162, 26, 182, 134, 5, 156, 189, 161, 7, 241, 243,
+                    67, 61, 119, 162, 23, 249, 197, 170, 242, 133, 32, 215, 70, 238, 76,
+                ],
+                public: vec![
+                    0, 244, 193, 240, 200, 30, 141, 37, 178, 23, 210, 103, 124, 98, 224, 218, 92,
+                    81, 204, 110, 194, 56, 124, 99, 52, 187, 223, 35, 238, 64, 168, 58,
+                ],
+            };
+
+            let id_keypair = libp2p::identity::ed25519::Keypair::try_from_bytes(&mut [
+                29, 80, 41, 218, 69, 171, 216, 208, 81, 85, 85, 197, 236, 17, 91, 96, 38, 65, 229,
+                98, 2, 119, 16, 16, 207, 166, 129, 114, 45, 37, 227, 170, 70, 148, 207, 216, 172,
+                243, 67, 32, 155, 81, 206, 155, 163, 129, 157, 241, 47, 94, 74, 33, 140, 75, 186,
+                146, 3, 21, 11, 55, 46, 21, 142, 45,
+            ])
+            .unwrap();
+
+            let decrypted_responder_payload = vec![
+                10, 36, 8, 1, 18, 32, 186, 196, 179, 68, 95, 62, 73, 178, 197, 255, 107, 215, 61,
+                156, 117, 45, 146, 6, 43, 121, 113, 235, 234, 110, 182, 75, 126, 17, 169, 138, 10,
+                11, 18, 64, 17, 58, 221, 125, 207, 199, 49, 71, 103, 229, 165, 24, 89, 34, 237,
+                189, 26, 213, 110, 14, 89, 26, 148, 93, 211, 247, 54, 173, 114, 241, 39, 124, 129,
+                6, 8, 163, 40, 110, 20, 141, 132, 125, 128, 180, 183, 55, 147, 133, 83, 199, 97,
+                83, 154, 107, 64, 215, 19, 170, 87, 28, 105, 219, 172, 7, 34, 28, 18, 12, 47, 121,
+                97, 109, 117, 120, 47, 49, 46, 48, 46, 48, 18, 12, 47, 109, 112, 108, 101, 120, 47,
+                54, 46, 55, 46, 48,
+            ];
+
             FakeResponder {
                 read_buffers: vec![
                     // <- e, ee, s, es
                     vec![
-                        153, 227, 187, 95, 38, 18, 164, 53, 136, 46, 26, 192, 153, 135, 227, 14,
-                        169, 30, 107, 75, 42, 237, 220, 30, 214, 34, 160, 196, 252, 134, 63, 81,
-                        243, 42, 76, 1, 71, 167, 162, 19, 61, 216, 143, 150, 123, 220, 233, 59,
-                        241, 16, 238, 247, 62, 25, 148, 216, 174, 10, 100, 81, 249, 244, 34, 19,
-                        241, 208, 40, 187, 125, 82, 197, 178, 166, 44, 183, 1, 78, 142, 11, 42,
-                        239, 194, 27, 46, 46, 25, 193, 97, 226, 141, 0, 148, 19, 180, 12, 6, 254,
-                        139, 88, 15, 139, 123, 161, 184, 50, 74, 34, 100, 239, 25, 162, 207, 73,
-                        46, 106, 100, 101, 248, 52, 59, 24, 100, 189, 139, 243, 71, 214, 188, 224,
-                        162, 178, 159, 77, 55, 89, 222, 227, 254, 42, 193, 200, 144, 216, 106, 117,
-                        101, 70, 102, 36, 129, 190, 180, 215, 221, 68, 216, 24, 184, 52, 246, 146,
-                        27, 38, 54, 68, 184, 245, 13, 106, 191, 171, 167, 171, 5, 109, 115, 137,
-                        152, 209, 201, 225, 58, 167, 176, 35, 31, 167, 173, 17, 5, 34, 96, 108, 22,
-                        120, 157, 241, 251, 196, 126, 103, 63, 139, 138, 173, 188, 195, 71, 199,
-                        249, 198, 169, 186, 111, 212, 177, 237, 96, 60, 72, 223, 208, 220, 67, 49,
-                        133, 112, 83, 111, 89,
+                        121, 81, 106, 82, 151, 164, 245, 36, 216, 248, 241, 242, 248, 214, 183,
+                        234, 149, 149, 20, 66, 25, 211, 193, 141, 40, 89, 194, 66, 234, 221, 180,
+                        120, 37, 31, 67, 98, 171, 222, 20, 237, 223, 250, 39, 203, 34, 52, 103, 53,
+                        253, 191, 228, 81, 187, 90, 245, 183, 223, 176, 139, 66, 246, 30, 139, 243,
+                        25, 78, 245, 104, 24, 163, 158, 51, 84, 43, 13, 224, 45, 66, 186, 122, 91,
+                        14, 197, 243, 107, 71, 131, 33, 180, 98, 61, 239, 73, 248, 97, 109, 47,
+                        246, 64, 21, 73, 195, 128, 65, 58, 87, 195, 193, 221, 21, 135, 238, 222,
+                        11, 102, 132, 75, 42, 114, 130, 148, 197, 52, 213, 65, 133, 213, 13, 63,
+                        68, 152, 235, 120, 203, 41, 122, 64, 15, 33, 163, 91, 222, 67, 103, 192, 8,
+                        107, 87, 163, 114, 186, 119, 189, 195, 121, 49, 84, 36, 225, 168, 181, 30,
+                        86, 168, 95, 152, 79, 207, 37, 125, 114, 66, 123, 116, 5, 116, 89, 182,
+                        144, 56, 186, 153, 60, 13, 123, 86, 186, 36, 29, 235, 5, 190, 191, 28, 147,
+                        241, 25, 3, 151, 251, 231, 229, 43, 205, 136, 176, 114, 22, 48, 200, 220,
+                        172, 92, 56, 196, 84, 48, 56, 118, 70, 213, 186, 184, 122, 176, 10, 90,
+                        209, 20, 84,
+                    ],
+                    // response of the ipfs after the handshake
+                    vec![
+                        136, 142, 154, 77, 15, 8, 103, 63, 47, 2, 20, 89, 33, 31, 15, 143, 223,
+                        113, 182, 113, 46, 27, 224, 103, 205, 34, 197, 154, 184, 122, 26, 205, 183,
+                        157, 18, 179,
                     ],
                 ],
                 write_buffers: vec![
                     // -> e
-                    ephemeral_key.public.clone(),
-                    // TODO: add last steps
+                    ephemeral_keypair.public.clone(),
+                    // -> s, se
+                    vec![
+                        63, 167, 91, 3, 94, 173, 97, 155, 117, 117, 199, 187, 244, 14, 125, 76, 98,
+                        89, 67, 200, 23, 184, 160, 194, 228, 199, 123, 158, 137, 153, 40, 77, 77,
+                        164, 61, 147, 18, 54, 8, 152, 135, 11, 206, 174, 54, 248, 10, 148, 19, 248,
+                        95, 83, 176, 178, 11, 224, 102, 250, 47, 15, 49, 255, 36, 40, 30, 174, 64,
+                        165, 35, 135, 196, 12, 116, 12, 153, 225, 90, 199, 101, 47, 190, 212, 176,
+                        63, 185, 114, 42, 110, 225, 224, 179, 229, 224, 97, 103, 123, 202, 29, 105,
+                        180, 233, 206, 19, 213, 119, 188, 43, 192, 170, 223, 231, 59, 0, 225, 229,
+                        113, 214, 5, 66, 102, 69, 242, 121, 167, 216, 5, 190, 201, 48, 74, 61, 152,
+                        100, 25, 38, 173, 108, 134, 9, 98, 249, 91, 63, 3, 106, 79, 75, 230, 230,
+                        81, 187, 140, 224, 1, 153, 104, 90, 223, 157, 214, 183, 176, 205, 39, 19,
+                        7, 23, 165,
+                    ],
                 ],
-                static_key: snow::Keypair {
-                    private: vec![
-                        168, 52, 148, 164, 50, 146, 162, 26, 182, 134, 5, 156, 189, 161, 7, 241,
-                        243, 67, 61, 119, 162, 23, 249, 197, 170, 242, 133, 32, 215, 70, 238, 76,
-                    ],
-                    public: vec![
-                        0, 244, 193, 240, 200, 30, 141, 37, 178, 23, 210, 103, 124, 98, 224, 218,
-                        92, 81, 204, 110, 194, 56, 124, 99, 52, 187, 223, 35, 238, 64, 168, 58,
-                    ],
-                },
-                ephemeral_key,
+                static_keypair,
+                ephemeral_keypair,
+                id_keypair,
+                decrypted_responder_payload,
                 current_read: 0,
                 current_write: 0,
             }
         }
 
-        fn static_key(&self) -> snow::Keypair {
+        fn static_keypair(&self) -> snow::Keypair {
             snow::Keypair {
-                private: self.static_key.private.clone(),
-                public: self.static_key.public.clone(),
+                private: self.static_keypair.private.clone(),
+                public: self.static_keypair.public.clone(),
             }
         }
 
-        fn ephemeral_key(&self) -> snow::Keypair {
+        fn ephemeral_keypair(&self) -> snow::Keypair {
             snow::Keypair {
-                private: self.ephemeral_key.private.clone(),
-                public: self.ephemeral_key.public.clone(),
+                private: self.ephemeral_keypair.private.clone(),
+                public: self.ephemeral_keypair.public.clone(),
             }
+        }
+
+        fn id_keypair(&self) -> libp2p::identity::ed25519::Keypair {
+            self.id_keypair.clone()
         }
     }
 
@@ -273,11 +347,15 @@ mod tests {
             buf: &mut tokio::io::ReadBuf<'_>,
         ) -> Poll<std::io::Result<()>> {
             let result = &self.read_buffers[self.current_read];
-
             let ipfs_header = result.len() as u16;
+            buf.clear();
+
             buf.initialized_mut()[..IPFS_HEADER_LEN].copy_from_slice(&ipfs_header.to_be_bytes());
             buf.initialized_mut()[IPFS_HEADER_LEN..(IPFS_HEADER_LEN + result.len())]
                 .copy_from_slice(result);
+
+            buf.set_filled(IPFS_HEADER_LEN + result.len());
+
             self.current_read += 1;
 
             Poll::Ready(Ok(()))
@@ -313,32 +391,32 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn test_snow_handshake() {
-    //     let mut fake_responder = FakeResponder::new();
-
-    //     let static_key = fake_responder.static_key();
-    //     let ephemeral_key = fake_responder.ephemeral_key();
-    //     handshake_with_snow(&mut fake_responder, &static_key, Some(&ephemeral_key)).unwrap();
-    // }
-
     #[tokio::test]
     async fn test_handshake() {
+        pretty_env_logger::init();
         let mut fake_responder = FakeResponder::new();
 
-        let static_keypair = fake_responder.static_key();
-        let ephemeral_keypair = fake_responder.ephemeral_key();
+        let static_keypair = fake_responder.static_keypair();
+        let ephemeral_keypair = fake_responder.ephemeral_keypair();
+        let id_keypair = fake_responder.id_keypair();
+        let expected_payload =
+            NoiseHandshakePayload::decode(fake_responder.decrypted_responder_payload.as_slice())
+                .unwrap();
 
-        let handshake = IpfsNoiseHandshake1::new(
+        let handshake = IpfsNoiseHandshake1::new_for_test(
             &mut fake_responder,
             &static_keypair,
-            Some(&ephemeral_keypair),
+            &ephemeral_keypair,
         )
         .await
         .unwrap();
 
         let handshake = handshake.send_e().await.unwrap();
+
         let (payload, handshake) = handshake.process_response().await.unwrap();
+        assert_eq!(payload, expected_payload);
+
+        let payload = create_payload(&static_keypair, &id_keypair).unwrap();
 
         handshake.send_s(payload).await.unwrap();
     }

@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Result, Context};
 use bytes::{BufMut, BytesMut};
 use chacha20poly1305::{
     aead::{Aead, AeadMut},
@@ -14,6 +14,9 @@ use super::{crypto_primitives, CipherKey, DhKey, HashDigest, TAGLEN};
 
 use super::IPFS_NOISE_PROTOCOL_NAME;
 
+/// Last valid nonce value, u64::MAX is reserved
+const MAX_NONCE: u64 = u64::MAX - 1;
+
 /// The key k and nonce n are used to encrypt static public keys and handshake payloads.
 pub struct CipherState {
     k: Option<CipherKey>,
@@ -22,7 +25,6 @@ pub struct CipherState {
 
 impl CipherState {
     pub fn initialize_key(k: Option<CipherKey>) -> Self {
-        println!("DEBUG: initialize cipher with {k:?}");
         Self { k, n: 0 }
     }
 
@@ -37,7 +39,10 @@ impl CipherState {
 
             cipher.encrypt(self.n, ad, plaintext, &mut ciphertext);
 
-            // TODO: overflow
+            if self.n == MAX_NONCE {
+                return Err(anyhow!("Nonce overflow"));
+            }
+
             self.n += 1;
 
             ciphertext
@@ -125,7 +130,6 @@ impl SymmetricState {
         let mut ck = HashDigest::default();
         let mut temp_k = HashDigest::default();
 
-        println!("DEBUG: input key: {input_key:02X?}");
         hasher.hkdf(&self.ck, input_key, 2, &mut ck, &mut temp_k, &mut []);
 
         self.cipher_state = CipherState::initialize_key(Some(temp_k));
@@ -140,9 +144,6 @@ impl SymmetricState {
         hasher.input(&self.h);
         hasher.input(data);
         hasher.result(&mut self.h);
-
-        // TODO: remove
-        println!("my mixhash: {:02X?}", self.h);
 
         Ok(())
     }
@@ -195,7 +196,6 @@ impl HandshakeState {
         let mut symmetric_state = SymmetricState::initialize_symmetric(protocol_name)?;
 
         // TODO: for now only XX is present, make the conversion to vecdeque nicer, or use other struct
-        // TODO: convert str to enum
         let message_patterns = vec![
             vec![MessagePatternToken::E].into(),
             vec![
@@ -246,21 +246,17 @@ impl HandshakeState {
         let mut buf = BytesMut::new();
 
         for token in current_pattern {
-            println!("DEBUG: write, parse {token:?}");
             match token {
                 MessagePatternToken::E => {
-                    // if self.e.is_some() {
-                    //     return Err(anyhow!("Invalid token, 'e' is already set"));
-                    // }
-
                     let e_dh = if let Some(e) = &self.e {
+                        // e might be already set for testing purposes
                         e
                     } else {
                         let mut e_dh = crypto_primitives::get_dh()?;
                         e_dh.generate(crypto_primitives::get_rand()?.as_mut());
 
                         self.e = Some(e_dh);
-                        // TODO: unwrap
+
                         self.e.as_ref().unwrap()
                     };
 
@@ -298,7 +294,6 @@ impl HandshakeState {
         let mut offset = 0;
 
         for token in current_pattern {
-            println!("DEBUG: read, parse {token:?}");
             match token {
                 MessagePatternToken::E => {
                     if self.re.is_some() {
