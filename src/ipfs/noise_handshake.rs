@@ -1,6 +1,6 @@
-//! Minimal implementation of noise protocol handshake
+//! Implementation of noise protocol handshake used in IPFS
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use bytes::{Buf, BufMut, BytesMut};
 use log::{debug, info};
 use prost::Message;
@@ -9,169 +9,171 @@ use tokio::{
     net::TcpStream,
 };
 
-use crate::messages;
-pub mod crypto_primitives;
-pub mod handshake_sm;
+use crate::{
+    messages::{self, NoiseHandshakePayload},
+    sweet_noise::{handshake_sm, IPFS_NOISE_PROTOCOL_NAME, MSGLEN},
+};
 
-pub const IPFS_NOISE_PROTOCOL_NAME: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
+use self::handshake_sm::HandshakeState;
 
-/// Tag len for ChaChaPoly AEAD
-const TAGLEN: usize = 16;
-
-/// Len of DH priv and pub keys
-const DHLEN: usize = 32;
-
-/// Len of the hash digest
-const HASHLEN: usize = 32;
-
-/// Max length of one noise message
-const MSGLEN: usize = 65535;
-
-/// Priv and Pub key type of Dh25519 curve
-pub type DhKey = [u8; DHLEN];
-
-/// Key type for ChaCha
-// TODO: use secrecy or zeroize for keys
-pub type CipherKey = [u8; 32];
-/// Hash digest type for SHA256
-pub type HashDigest = [u8; HASHLEN];
-
-trait AsyncGenericResponder: tokio::io::AsyncRead + tokio::io::AsyncWrite + std::marker::Unpin {}
+pub trait AsyncGenericResponder:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + std::marker::Unpin
+{
+}
 
 impl AsyncGenericResponder for tokio::net::TcpStream {}
 
-/// Establish secure connection using noise protocol handshake
-pub async fn execute_handshake(
-    connection: &mut TcpStream,
-    static_keypair: &snow::Keypair,
-) -> Result<()> {
-    handshake(connection, static_keypair, None).await
+/// Allows to establish secure connection to the IPFS node using noise protocol
+/// Technical details: https://github.com/libp2p/specs/blob/master/noise/README.md
+pub struct IpfsNoiseHandshake1<'a, T: AsyncGenericResponder> {
+    initiator: HandshakeState,
+    connection: &'a mut T,
 }
 
-async fn handshake(
-    connection: &mut impl AsyncGenericResponder,
-    static_keypair: &snow::Keypair,
-    ephemeral_keypair: Option<&snow::Keypair>,
-) -> Result<()> {
-    info!("Noise handshake begins...");
+impl<'a, T: AsyncGenericResponder> IpfsNoiseHandshake1<'a, T> {
+    pub async fn new(
+        connection: &'a mut T,
+        static_keypair: &snow::Keypair,
+        ephemeral_keypair: Option<&snow::Keypair>,
+    ) -> Result<IpfsNoiseHandshake1<'a, T>> {
+        let mut initiator = handshake_sm::HandshakeState::initialize(
+            IPFS_NOISE_PROTOCOL_NAME,
+            &static_keypair.private,
+        )
+        .context("while initializing handshake SM")?;
 
-    let mut initiator =
-        handshake_sm::HandshakeState::initialize(IPFS_NOISE_PROTOCOL_NAME, &static_keypair.private)
-            .context("while initializing handshake SM")?;
+        if let Some(e) = ephemeral_keypair {
+            initiator.set_local_ephemeral_for_testing(&e.private)?;
+        }
 
-    if let Some(e) = ephemeral_keypair {
-        initiator.set_local_ephemeral_for_testing(&e.private)?;
+        Ok(Self {
+            initiator,
+            connection,
+        })
     }
 
-    // -> e
-    write_stage_1(&mut initiator, connection).await?;
+    pub async fn send_e(mut self) -> Result<IpfsNoiseHandshake2<'a, T>> {
+        debug!("-> e");
+        let mut noise_message = vec![0u8; MSGLEN];
+        let len = self
+            .initiator
+            .write_message(&[], &mut noise_message)
+            .context("while writing the message in the SM")?;
 
-    let mut rcv_buf = BytesMut::zeroed(65535);
-    read_stage_1(connection, &mut rcv_buf).await?;
+        send_ipfs_message(self.connection, &noise_message[..len]).await?;
 
-    // <- e, ee, s, es
-    println!("-> e, ee, s, es");
-    let mut raw_payload = BytesMut::zeroed(65535);
-    let payload_len = initiator
-        .read_message(&mut rcv_buf, &mut raw_payload)
-        .unwrap();
+        Ok(IpfsNoiseHandshake2 {
+            initiator: self.initiator,
+            connection: self.connection,
+        })
+    }
+}
 
-    let mut payload = messages::NoiseHandshakePayload::decode(&raw_payload[..payload_len]).unwrap();
-    println!("payload from second msg: {payload:#?}");
+async fn send_ipfs_message<T: AsyncGenericResponder>(
+    connection: &mut T,
+    payload: &[u8],
+) -> Result<()> {
+    let mut finalbuf = BytesMut::new();
+    finalbuf.put_u16(payload.len() as u16);
+    finalbuf.put_slice(&payload);
+    connection.write_all(&finalbuf).await?;
 
-    println!("decoding the responder key");
-    let responder_key =
-        messages::PublicKey::decode(payload.identity_key.as_ref().unwrap().clone().as_slice())
+    Ok(())
+}
+
+pub struct IpfsNoiseHandshake2<'a, T: AsyncGenericResponder> {
+    initiator: HandshakeState,
+    connection: &'a mut T,
+}
+
+impl<'a, T: AsyncGenericResponder> IpfsNoiseHandshake2<'a, T> {
+    pub async fn process_response(
+        mut self,
+    ) -> Result<(NoiseHandshakePayload, IpfsNoiseHandshake3<'a, T>)> {
+        debug!("<- e, ee, s, es");
+
+        let mut rcv_buf = BytesMut::zeroed(65535);
+        let rcv = self.connection.read(&mut rcv_buf).await?;
+        debug!("read {rcv} bytes");
+        rcv_buf.resize(rcv, 0);
+        let len = rcv_buf.get_u16();
+        debug!("len in payload {len} bytes");
+
+        let mut raw_payload = BytesMut::zeroed(65535);
+        let payload_len = self
+            .initiator
+            .read_message(&mut rcv_buf, &mut raw_payload)
             .unwrap();
 
-    assert_eq!(responder_key.r#type, messages::KeyType::Ed25519 as i32);
-    let responder_key =
-        libp2p::identity::ed25519::PublicKey::try_from_bytes(&responder_key.data).unwrap();
+        raw_payload.resize(payload_len, 0);
 
-    println!("decoding the signature");
-    let rs = initiator.get_remote_static().unwrap();
-    let mut to_verify = BytesMut::new();
-    to_verify.put_slice("noise-libp2p-static-key:".as_bytes());
-    to_verify.put_slice(rs);
+        let payload = self.decode_payload(&mut raw_payload)?;
 
-    assert!(responder_key.verify(&to_verify, payload.identity_sig()));
+        Ok((
+            payload,
+            IpfsNoiseHandshake3 {
+                initiator: self.initiator,
+                connection: self.connection,
+            },
+        ))
+    }
 
-    println!("preparing the payload");
-    let id_keypair = libp2p::identity::ed25519::Keypair::generate();
+    fn decode_payload(&self, raw_payload: &BytesMut) -> Result<messages::NoiseHandshakePayload> {
+        let payload = messages::NoiseHandshakePayload::decode(&raw_payload[..])
+            .context("While decoding remote payload")?;
 
-    let mut to_sign = BytesMut::new();
-    to_sign.put_slice("noise-libp2p-static-key:".as_bytes());
-    to_sign.put_slice(&static_keypair.public);
+        let Some(responder_key) = &payload.identity_key else  {
+            return Err(anyhow!("Remote payload does not contain the identity key"));
+        };
 
-    let signature = id_keypair.sign(&to_sign);
-    payload.identity_sig = Some(signature);
+        let responder_key = messages::PublicKey::decode(responder_key.as_slice())
+            .context("While decoding responder key")?;
 
-    let encoded_pub_key = messages::PublicKey {
-        r#type: messages::KeyType::Ed25519 as i32,
-        data: id_keypair.public().to_bytes().into(),
-    };
+        if responder_key.r#type != messages::KeyType::Ed25519 as i32 {
+            return Err(anyhow!("Unsupported key type id: {}", responder_key.r#type));
+        }
 
-    payload.identity_key = Some(encoded_pub_key.encode_to_vec());
+        let responder_key =
+            libp2p::identity::ed25519::PublicKey::try_from_bytes(&responder_key.data).unwrap();
 
-    // -> s, se
-    let mut buf = vec![0u8; 65535];
-    let mut raw_payload = BytesMut::new();
-    payload.encode(&mut raw_payload).unwrap();
+        let rs = self
+            .initiator
+            .get_remote_static()
+            .expect("rs should be set by state machine");
 
-    println!("encoded raw payload: {}", raw_payload.len());
+        let mut to_verify = BytesMut::new();
+        to_verify.put_slice("noise-libp2p-static-key:".as_bytes());
+        to_verify.put_slice(rs);
 
-    let len = initiator.write_message(&raw_payload, &mut buf).unwrap();
-    println!("LEN: {len}");
+        assert!(responder_key.verify(&to_verify, payload.identity_sig()));
 
-    let mut finalbuf = BytesMut::new();
-    finalbuf.put_u16(len as u16);
-    finalbuf.put_slice(&buf[..len]);
-    connection.write_all(&finalbuf).await.unwrap();
-
-    let mut rcv_buf = BytesMut::zeroed(65535);
-    let rcv = connection.read(&mut rcv_buf).await?;
-    println!("read {rcv} bytes");
-    rcv_buf.resize(rcv, 0);
-    let len = rcv_buf.get_u16();
-    println!("len in payload {len} bytes");
-    // TODO: parse payload?
-
-    // let mut noise = initiator.into_transport_mode().unwrap();
-    println!("session established!");
-
-    Ok(())
+        Ok(payload)
+    }
 }
 
-async fn read_stage_1(
-    connection: &mut impl AsyncGenericResponder,
-    rcv_buf: &mut BytesMut,
-) -> Result<()> {
-    let rcv = connection.read(rcv_buf).await?;
-    println!("read {rcv} bytes");
-    rcv_buf.resize(rcv, 0);
-    let len = rcv_buf.get_u16();
-    println!("len in payload {len} bytes");
-
-    Ok(())
+pub struct IpfsNoiseHandshake3<'a, T: AsyncGenericResponder> {
+    initiator: HandshakeState,
+    connection: &'a mut T,
 }
 
-async fn write_stage_1(
-    initiator: &mut handshake_sm::HandshakeState,
-    connection: &mut impl AsyncGenericResponder,
-) -> Result<()> {
-    debug!("-> e");
-    let mut buf = vec![0u8; MSGLEN];
-    let len = initiator
-        .write_message(&[], &mut buf)
-        .context("while writing the message in the SM")?;
-    debug!("written: {len} bytes to SM");
+impl<'a, T: AsyncGenericResponder> IpfsNoiseHandshake3<'a, T> {
+    pub async fn send_s(mut self, payload: messages::NoiseHandshakePayload) -> Result<()> {
+        debug!("-> s, se");
 
-    let mut finalbuf = BytesMut::new();
-    finalbuf.put_u16(len as u16);
-    finalbuf.put_slice(&buf[..len]);
-    connection.write_all(&finalbuf).await.unwrap();
+        let mut buf = vec![0u8; MSGLEN];
+        let mut raw_payload = BytesMut::new();
+        payload.encode(&mut raw_payload).unwrap();
 
-    Ok(())
+        let len = self
+            .initiator
+            .write_message(&raw_payload, &mut buf)
+            .unwrap();
+
+        send_ipfs_message(self.connection, &buf[..len]).await?;
+
+        // TODO: step 4 - call split?
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -324,10 +326,20 @@ mod tests {
     async fn test_handshake() {
         let mut fake_responder = FakeResponder::new();
 
-        let static_key = fake_responder.static_key();
-        let ephemeral_key = fake_responder.ephemeral_key();
-        handshake(&mut fake_responder, &static_key, Some(&ephemeral_key))
-            .await
-            .unwrap();
+        let static_keypair = fake_responder.static_key();
+        let ephemeral_keypair = fake_responder.ephemeral_key();
+
+        let handshake = IpfsNoiseHandshake1::new(
+            &mut fake_responder,
+            &static_keypair,
+            Some(&ephemeral_keypair),
+        )
+        .await
+        .unwrap();
+
+        let handshake = handshake.send_e().await.unwrap();
+        let (payload, handshake) = handshake.process_response().await.unwrap();
+
+        handshake.send_s(payload).await.unwrap();
     }
 }

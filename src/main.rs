@@ -1,12 +1,14 @@
-mod multistream;
+mod ipfs;
 mod qnd_sync;
 mod sweet_noise;
 
 use anyhow::Result;
 
+use ipfs::noise_handshake::IpfsNoiseHandshake1;
 use log::info;
 
-use sweet_noise::crypto_primitives;
+use prost::Message;
+use sweet_noise::generate_keypair;
 use tokio::net::TcpStream;
 
 pub mod messages {
@@ -22,32 +24,8 @@ async fn main() -> Result<()> {
     info!("Connecting to IPFS node on {address}...");
     let mut connection = TcpStream::connect(address).await?;
 
-    connect_to_ipfs_node(&mut connection).await?;
+    ipfs::connect_to_node(&mut connection).await?;
     // qnd_sync::test_connection()?;
 
     Ok(())
-}
-
-async fn connect_to_ipfs_node(connection: &mut TcpStream) -> Result<()> {
-    multistream::negotiate_noise_protocol(connection).await?;
-
-    let static_key = generate_keypair()?;
-    // let ephemeral_key = generate_keypair()?;
-
-    sweet_noise::execute_handshake(connection, &static_key).await?;
-
-    Ok(())
-}
-
-fn generate_keypair() -> Result<snow::Keypair> {
-    let mut rng = crypto_primitives::get_rand()?;
-    let mut dh = crypto_primitives::get_dh()?;
-    let mut private = vec![0u8; dh.priv_len()];
-    let mut public = vec![0u8; dh.pub_len()];
-    dh.generate(&mut *rng);
-
-    private.copy_from_slice(dh.privkey());
-    public.copy_from_slice(dh.pubkey());
-
-    Ok(snow::Keypair { private, public })
 }

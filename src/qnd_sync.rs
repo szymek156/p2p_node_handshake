@@ -7,8 +7,8 @@ use bytes::{Buf, BufMut, BytesMut};
 use prost::Message;
 
 use crate::{
-    crypto_primitives, messages,
-    sweet_noise::{handshake_sm, IPFS_NOISE_PROTOCOL_NAME},
+    messages,
+    sweet_noise::{crypto_primitives, handshake_sm, IPFS_NOISE_PROTOCOL_NAME},
 };
 
 pub fn test_connection() -> Result<()> {
