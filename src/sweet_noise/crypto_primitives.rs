@@ -1,6 +1,8 @@
 //! Abstraction layer for creating crypto primitives.
 //! For simplicity crypto primitives are resolved currently
 //! with use of snow crate.
+use std::ops::Deref;
+
 use anyhow::{anyhow, Result};
 use snow::{
     params::{CipherChoice, DHChoice, HashChoice},
@@ -11,12 +13,11 @@ use snow::{
 use super::CipherKey;
 
 pub fn get_cipher_with_key(k: &CipherKey) -> Result<Box<dyn Cipher>> {
-
     let mut cipher = DefaultResolver
         .resolve_cipher(&CipherChoice::ChaChaPoly)
         .ok_or(anyhow!("Cannot resolve cipher"))?;
 
-    cipher.set(k);
+    cipher.set(&k);
 
     Ok(cipher)
 }

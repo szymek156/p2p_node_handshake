@@ -1,10 +1,13 @@
+/// This is a minimal implementation of noise state machine as defined in:
+/// https://noiseprotocol.org/noise.html#processing-rules
 use std::collections::VecDeque;
+use std::vec::IntoIter;
 
 use anyhow::{anyhow, Result};
 use bytes::{BufMut, BytesMut};
 use snow::types::Dh;
 
-use crate::sweet_noise::DHLEN;
+use crate::sweet_noise::DH_LEN;
 
 use super::{crypto_primitives, CipherKey, DhKey, HashDigest, TAGLEN};
 
@@ -128,7 +131,7 @@ impl SymmetricState {
 
         hasher.hkdf(&self.ck, input_key, 2, &mut ck, &mut temp_k, &mut []);
 
-        self.cipher_state = CipherState::initialize_key(Some(temp_k));
+        self.cipher_state = CipherState::initialize_key(Some(temp_k.into()));
         self.ck = ck;
 
         Ok(())
@@ -144,7 +147,6 @@ impl SymmetricState {
         Ok(())
     }
 
-    #[must_use]
     pub fn encrypt_and_hash(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let ciphertext = self.cipher_state.encrypt_with_ad(&self.h, plaintext)?;
 
@@ -153,7 +155,6 @@ impl SymmetricState {
         Ok(ciphertext)
     }
 
-    #[must_use]
     fn decrypt_and_hash(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>> {
         let plaintext = self.cipher_state.decrypt_with_ad(&self.h, ciphertext)?;
         self.mix_hash(ciphertext)?;
@@ -167,7 +168,7 @@ pub struct HandshakeState {
     e: Option<Box<dyn Dh>>,
     rs: Option<DhKey>,
     re: Option<DhKey>,
-    message_patterns: VecDeque<VecDeque<MessagePatternToken>>,
+    message_patterns: IntoIter<Vec<MessagePatternToken>>,
     // TODO: initiator flag, or type state?
 }
 
@@ -183,6 +184,7 @@ enum MessagePatternDhOpToken {
     EE,
     ES,
     SE,
+    #[allow(dead_code)]
     SS,
 }
 
@@ -193,21 +195,19 @@ impl HandshakeState {
 
         // TODO: for now only XX is present, make the conversion to vecdeque nicer, or use other struct
         let message_patterns = vec![
-            vec![MessagePatternToken::E].into(),
+            vec![MessagePatternToken::E],
             vec![
                 MessagePatternToken::E,
                 MessagePatternToken::DhOp(MessagePatternDhOpToken::EE),
                 MessagePatternToken::S,
                 MessagePatternToken::DhOp(MessagePatternDhOpToken::ES),
-            ]
-            .into(),
+            ],
             vec![
                 MessagePatternToken::S,
                 MessagePatternToken::DhOp(MessagePatternDhOpToken::SE),
-            ]
-            .into(),
+            ],
         ]
-        .into();
+        .into_iter();
 
         let mut s_dh = crypto_primitives::get_dh()?;
         s_dh.set(local_static_priv);
@@ -235,7 +235,7 @@ impl HandshakeState {
     }
 
     pub fn write_message(&mut self, payload: &[u8], out: &mut [u8]) -> Result<usize> {
-        let Some(current_pattern) = self.message_patterns.pop_front() else {
+        let Some(current_pattern) = self.message_patterns.next() else {
             // TODO: If there are no more message patterns returns two new CipherState objects by calling Split().
             return Err(anyhow!("No more message patterns to consume"));
         };
@@ -283,7 +283,7 @@ impl HandshakeState {
     }
 
     pub fn read_message(&mut self, input: &[u8], payload: &mut [u8]) -> Result<usize> {
-        let Some(current_pattern) = self.message_patterns.pop_front() else {
+        let Some(current_pattern) = self.message_patterns.next() else {
             // TODO: If there are no more message patterns returns two new CipherState objects by calling Split().
             return Err(anyhow!("No more message patterns to consume"));
         };
@@ -299,9 +299,9 @@ impl HandshakeState {
 
                     let mut re_pub = DhKey::default();
                     // TODO: might panic
-                    re_pub.copy_from_slice(&input[offset..(offset + DHLEN)]);
+                    re_pub.copy_from_slice(&input[offset..(offset + DH_LEN)]);
                     // TODO: use Bytes?
-                    offset += DHLEN;
+                    offset += DH_LEN;
 
                     self.symmetric_state.mix_hash(&re_pub)?;
 
@@ -314,14 +314,13 @@ impl HandshakeState {
 
                     let ct_len = if self.symmetric_state.cipher_state.has_key() {
                         // Message is encrypted with a tag
-                        DHLEN + TAGLEN
+                        DH_LEN + TAGLEN
                     } else {
                         // No key set yet
-                        DHLEN
+                        DH_LEN
                     };
 
                     // TODO: that doesn't have to be heap allocated
-                    // TODO: introduce zeroize type for such things
                     let mut ciphertext = vec![0u8; ct_len];
                     ciphertext.copy_from_slice(&input[offset..(offset + ct_len)]);
                     offset += ct_len;
@@ -329,7 +328,7 @@ impl HandshakeState {
                     let plaintext = self.symmetric_state.decrypt_and_hash(&ciphertext)?;
 
                     let mut rs_pub = DhKey::default();
-                    rs_pub.copy_from_slice(&plaintext[..DHLEN]);
+                    rs_pub.copy_from_slice(&plaintext[..DH_LEN]);
 
                     self.rs = Some(rs_pub);
                 }

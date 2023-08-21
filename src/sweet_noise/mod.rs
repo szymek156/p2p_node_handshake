@@ -1,6 +1,9 @@
 //! Minimal implementation of noise protocol handshake
 
+use std::ops::{Deref, DerefMut};
+
 use anyhow::Result;
+use zeroize::ZeroizeOnDrop;
 
 pub mod crypto_primitives;
 pub mod handshake_sm;
@@ -11,22 +14,63 @@ pub const IPFS_NOISE_PROTOCOL_NAME: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
 pub const TAGLEN: usize = 16;
 
 /// Len of DH priv and pub keys
-pub const DHLEN: usize = 32;
+pub const DH_LEN: usize = 32;
 
 /// Len of the hash digest
-pub const HASHLEN: usize = 32;
+pub const HASH_LEN: usize = 32;
 
 /// Max length of one noise message
-pub const MSGLEN: usize = 65535;
+pub const MSG_LEN: usize = 65535;
+
+/// Key length for ChaCha
+pub const CIPHER_KEY_LEN: usize = 32;
 
 /// Priv and Pub key type of Dh25519 curve
-pub type DhKey = [u8; DHLEN];
+#[derive(ZeroizeOnDrop, Default)]
+pub struct DhKey([u8; DH_LEN]);
+
+impl From<[u8; DH_LEN]> for DhKey {
+    fn from(value: [u8; DH_LEN]) -> Self {
+        Self(value)
+    }
+}
+
+impl Deref for DhKey {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        // self.as_ref()
+        &self.0
+    }
+}
+
+impl DerefMut for DhKey {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 /// Key type for ChaCha
-// TODO: use secrecy or zeroize for keys
-pub type CipherKey = [u8; 32];
+#[derive(ZeroizeOnDrop)]
+pub struct CipherKey([u8; CIPHER_KEY_LEN]);
+
+impl From<[u8; CIPHER_KEY_LEN]> for CipherKey {
+    fn from(value: [u8; CIPHER_KEY_LEN]) -> Self {
+        Self(value)
+    }
+}
+
+impl Deref for CipherKey {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        // self.as_ref()
+        &self.0
+    }
+}
+
 /// Hash digest type for SHA256
-pub type HashDigest = [u8; HASHLEN];
+pub type HashDigest = [u8; HASH_LEN];
 
 pub fn generate_keypair() -> Result<snow::Keypair> {
     let mut rng = crypto_primitives::get_rand()?;

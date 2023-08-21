@@ -20,6 +20,26 @@ pub async fn connect_to_node(connection: &mut TcpStream) -> Result<()> {
         .await
         .context("while negotiating noise protocol")?;
 
+    execute_noise_handshake(connection)
+        .await
+        .context("While handshaking in noise")?;
+
+    // TODO: split?
+    let mut rcv_buf = BytesMut::zeroed(65535);
+    let rcv = connection.read(&mut rcv_buf).await?;
+    println!("read {rcv} bytes");
+    rcv_buf.resize(rcv, 0);
+    let len = rcv_buf.get_u16();
+    println!("len in payload {len} bytes");
+
+    info!("session established!");
+
+    Ok(())
+}
+
+/// Start noise handshake to upgrade current connection with the secure layer
+async fn execute_noise_handshake(connection: &mut TcpStream) -> Result<()> {
+    info!("Noise handshake begin");
     let static_keypair = generate_keypair()?;
     let id_keypair = libp2p::identity::ed25519::Keypair::generate();
 
@@ -41,16 +61,6 @@ pub async fn connect_to_node(connection: &mut TcpStream) -> Result<()> {
         .send_s(local_payload)
         .await
         .context("while sending s")?;
-
-    // TODO: split?
-    let mut rcv_buf = BytesMut::zeroed(65535);
-    let rcv = connection.read(&mut rcv_buf).await?;
-    println!("read {rcv} bytes");
-    rcv_buf.resize(rcv, 0);
-    let len = rcv_buf.get_u16();
-    println!("len in payload {len} bytes");
-
-    info!("session established!");
 
     Ok(())
 }

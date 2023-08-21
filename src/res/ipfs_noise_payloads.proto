@@ -1,5 +1,6 @@
+// https://github.com/libp2p/specs/blob/master/noise/README.md#the-libp2p-handshake-payload
 syntax = "proto2";
-package Bep.protobufs;
+package ipfs.noise;
 
 message NoiseExtensions {
     repeated bytes webtransport_certhashes = 1;

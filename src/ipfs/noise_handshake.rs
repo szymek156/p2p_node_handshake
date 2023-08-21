@@ -1,20 +1,21 @@
 //! Implementation of noise protocol handshake used in IPFS
 //! Uses typestate pattern to avoid misuse
 
-use crate::sweet_noise::{handshake_sm, IPFS_NOISE_PROTOCOL_NAME, MSGLEN};
+use crate::sweet_noise::{handshake_sm, IPFS_NOISE_PROTOCOL_NAME, MSG_LEN};
 use anyhow::{anyhow, Context, Result};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
 use log::debug;
 use prost::Message;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_util::codec::{Framed, FramedWrite, LengthDelimitedCodec};
+
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use self::{handshake_sm::HandshakeState, messages::NoiseHandshakePayload};
 
+/// Compiled protobuf definitions for payloads used between IPFS nodes during the handshake
 pub mod messages {
-    include!(concat!(env!("OUT_DIR"), "/bep.protobufs.rs"));
+    include!(concat!(env!("OUT_DIR"), "/ipfs.noise.rs"));
 }
 
 pub trait AsyncGenericResponder:
@@ -41,7 +42,7 @@ impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake1<'conn, T> {
         // https://github.com/libp2p/specs/blob/master/noise/README.md#wire-format
         let transport = LengthDelimitedCodec::builder()
             .length_field_type::<u16>()
-            .max_frame_length(MSGLEN)
+            .max_frame_length(MSG_LEN)
             .new_framed(connection);
 
         let initiator = handshake_sm::HandshakeState::initialize(
@@ -73,7 +74,7 @@ impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake1<'conn, T> {
     /// Sends ephemeral key over the wire and returns second state
     pub async fn send_e(mut self) -> Result<IpfsNoiseHandshake2<'conn, T>> {
         debug!("-> e");
-        let mut noise_message = BytesMut::zeroed(MSGLEN);
+        let mut noise_message = BytesMut::zeroed(MSG_LEN);
         let len = self
             .initiator
             .write_message(&[], &mut noise_message)
@@ -97,25 +98,30 @@ pub struct IpfsNoiseHandshake2<'conn, T: AsyncGenericResponder> {
 }
 
 impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake2<'conn, T> {
+    /// Handles receiving and processing the response: deriving keys, validating payload.
     pub async fn process_response(
         mut self,
     ) -> Result<(NoiseHandshakePayload, IpfsNoiseHandshake3<'conn, T>)> {
         debug!("<- e, ee, s, es");
 
-        // TODO: unwrap
-        let mut rcv_buf = self.transport.next().await.unwrap()?;
+        let rcv_buf = self
+            .transport
+            .next()
+            .await
+            .context("End of stream")?
+            .context("Invalid message")?;
 
-        let mut raw_payload = BytesMut::zeroed(MSGLEN);
+        let mut raw_payload = BytesMut::zeroed(MSG_LEN);
         debug!("<- read message");
         let payload_len = self
             .initiator
-            .read_message(&mut rcv_buf, &mut raw_payload)
+            .read_message(&rcv_buf, &mut raw_payload)
             .context("while processing the response in 2nd stage")?;
 
         raw_payload.resize(payload_len, 0);
 
         debug!("<- decode payload");
-        let payload = self.decode_payload(&mut raw_payload)?;
+        let payload = self.decode_payload(&raw_payload)?;
 
         Ok((
             payload,
@@ -170,7 +176,7 @@ impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake3<'conn, T> {
     pub async fn send_s(mut self, payload: messages::NoiseHandshakePayload) -> Result<()> {
         debug!("-> s, se");
 
-        let mut buf = BytesMut::zeroed(MSGLEN);
+        let mut buf = BytesMut::zeroed(MSG_LEN);
         let mut raw_payload = BytesMut::new();
 
         payload
@@ -341,7 +347,7 @@ mod tests {
             buf.clear();
 
             buf.put_slice(&ipfs_header.to_be_bytes());
-            buf.put_slice(&result);
+            buf.put_slice(result);
 
             self.current_read += 1;
 
