@@ -203,8 +203,6 @@ async fn send_ipfs_message<T: AsyncGenericResponder>(
 mod tests {
     use std::task::Poll;
 
-    use chacha20poly1305::aead::Payload;
-
     use crate::ipfs::create_payload;
 
     use super::*;

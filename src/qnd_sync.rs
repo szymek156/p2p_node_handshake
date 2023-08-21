@@ -4,7 +4,6 @@ use std::net::TcpStream;
 use anyhow::Result;
 use bytes::{Buf, BufMut, BytesMut};
 
-use chacha20poly1305::aead::Payload;
 use prost::Message;
 
 use crate::{
@@ -165,7 +164,7 @@ where
         &raw_payload[..payload_len]
     );
 
-    let mut payload = messages::NoiseHandshakePayload::decode(&raw_payload[..payload_len]).unwrap();
+    let payload = messages::NoiseHandshakePayload::decode(&raw_payload[..payload_len]).unwrap();
 
     // println!("payload from second msg: {payload:#?}");
 

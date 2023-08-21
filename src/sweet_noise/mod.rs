@@ -1,6 +1,6 @@
 //! Minimal implementation of noise protocol handshake
 
-use anyhow::{Result};
+use anyhow::Result;
 
 pub mod crypto_primitives;
 pub mod handshake_sm;

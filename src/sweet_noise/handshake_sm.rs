@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use anyhow::{anyhow, Result, Context};
+use anyhow::{anyhow, Result};
 use bytes::{BufMut, BytesMut};
 use chacha20poly1305::{
     aead::{Aead, AeadMut},

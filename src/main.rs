@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
     let address = "172.17.0.1:4001";
 
     info!("Connecting to IPFS node on {address}...");
-    let mut connection = TcpStream::connect(address).await?;
+    let _connection = TcpStream::connect(address).await?;
 
     // ipfs::connect_to_node(&mut connection).await?;
 
