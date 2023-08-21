@@ -111,7 +111,7 @@ impl SymmetricState {
             hasher.result(&mut h);
         }
 
-        let ck = h;
+        let ck = h.clone();
 
         Ok(Self {
             cipher_state: CipherState::initialize_key(None),

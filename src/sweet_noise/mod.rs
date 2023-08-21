@@ -60,6 +60,12 @@ impl From<[u8; CIPHER_KEY_LEN]> for CipherKey {
     }
 }
 
+impl From<HashDigest> for CipherKey {
+    fn from(value: HashDigest) -> Self {
+        Self(value.0)
+    }
+}
+
 impl Deref for CipherKey {
     type Target = [u8];
 
@@ -70,7 +76,23 @@ impl Deref for CipherKey {
 }
 
 /// Hash digest type for SHA256
-pub type HashDigest = [u8; HASH_LEN];
+#[derive(ZeroizeOnDrop, Default, Clone)]
+pub struct HashDigest([u8; HASH_LEN]);
+
+impl Deref for HashDigest {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        // self.as_ref()
+        &self.0
+    }
+}
+
+impl DerefMut for HashDigest {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 pub fn generate_keypair() -> Result<snow::Keypair> {
     let mut rng = crypto_primitives::get_rand()?;
