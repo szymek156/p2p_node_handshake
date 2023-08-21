@@ -1,6 +1,5 @@
 /// This is a minimal implementation of noise state machine as defined in:
 /// https://noiseprotocol.org/noise.html#processing-rules
-use std::collections::VecDeque;
 use std::vec::IntoIter;
 
 use anyhow::{anyhow, Result};
