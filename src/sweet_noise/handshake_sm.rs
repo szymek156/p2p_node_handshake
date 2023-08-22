@@ -2,8 +2,8 @@
 /// https://noiseprotocol.org/noise.html#processing-rules
 use std::vec::IntoIter;
 
-use anyhow::{anyhow, Result};
-use bytes::{BufMut, BytesMut};
+use anyhow::{anyhow, Context, Result};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use snow::types::Dh;
 
 use crate::sweet_noise::DH_LEN;
@@ -192,7 +192,6 @@ impl HandshakeState {
     pub fn initialize(protocol_name: &str, local_static_priv: &[u8]) -> Result<Self> {
         let mut symmetric_state = SymmetricState::initialize_symmetric(protocol_name)?;
 
-        // TODO: for now only XX is present, make the conversion to vecdeque nicer, or use other struct
         let message_patterns = vec![
             vec![MessagePatternToken::E],
             vec![
@@ -281,13 +280,11 @@ impl HandshakeState {
         Ok(buf.len())
     }
 
-    pub fn read_message(&mut self, input: &[u8], payload: &mut [u8]) -> Result<usize> {
+    pub fn read_message(&mut self, input: &mut Bytes, payload: &mut BytesMut) -> Result<usize> {
         let Some(current_pattern) = self.message_patterns.next() else {
             // TODO: If there are no more message patterns returns two new CipherState objects by calling Split().
             return Err(anyhow!("No more message patterns to consume"));
         };
-
-        let mut offset = 0;
 
         for token in current_pattern {
             match token {
@@ -297,10 +294,10 @@ impl HandshakeState {
                     }
 
                     let mut re_pub = DhKey::default();
-                    // TODO: might panic
-                    re_pub.copy_from_slice(&input[offset..(offset + DH_LEN)]);
-                    // TODO: use Bytes?
-                    offset += DH_LEN;
+
+                    re_pub.copy_from_slice(&input.chunk()[..DH_LEN]);
+
+                    input.advance(DH_LEN);
 
                     self.symmetric_state.mix_hash(&re_pub)?;
 
@@ -319,12 +316,12 @@ impl HandshakeState {
                         DH_LEN
                     };
 
-                    // TODO: that doesn't have to be heap allocated
-                    let mut ciphertext = vec![0u8; ct_len];
-                    ciphertext.copy_from_slice(&input[offset..(offset + ct_len)]);
-                    offset += ct_len;
+                    let plaintext = self
+                        .symmetric_state
+                        .decrypt_and_hash(&input.chunk()[..ct_len])
+                        .context("while decrypting rs_pub")?;
 
-                    let plaintext = self.symmetric_state.decrypt_and_hash(&ciphertext)?;
+                    input.advance(ct_len);
 
                     let mut rs_pub = DhKey::default();
                     rs_pub.copy_from_slice(&plaintext[..DH_LEN]);
@@ -338,11 +335,13 @@ impl HandshakeState {
         }
 
         // Calls DecryptAndHash() on the remaining bytes of the message and stores the output into payload_buffer.
-        let remaining = &input[offset..];
+        let plaintext = self
+            .symmetric_state
+            .decrypt_and_hash(&input)
+            .context("while decrypting payload")?;
 
-        let plaintext = self.symmetric_state.decrypt_and_hash(remaining)?;
+        payload.put_slice(&plaintext);
 
-        payload[..plaintext.len()].copy_from_slice(&plaintext);
         Ok(plaintext.len())
     }
 

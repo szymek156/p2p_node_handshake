@@ -111,14 +111,12 @@ impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake2<'conn, T> {
             .context("End of stream")?
             .context("Invalid message")?;
 
-        let mut raw_payload = BytesMut::zeroed(MSG_LEN);
+        let mut raw_payload = BytesMut::new();
         debug!("<- read message");
-        let payload_len = self
+        self
             .initiator
-            .read_message(&rcv_buf, &mut raw_payload)
+            .read_message(&mut rcv_buf.freeze(), &mut raw_payload)
             .context("while processing the response in 2nd stage")?;
-
-        raw_payload.resize(payload_len, 0);
 
         debug!("<- decode payload");
         let payload = self.decode_payload(&raw_payload)?;
