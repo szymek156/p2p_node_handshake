@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use bytes::{Buf, BufMut, BytesMut};
+use futures_util::StreamExt;
 use log::{debug, info};
 use prost::Message;
 use snow::Keypair;
 use tokio::{io::AsyncReadExt, net::TcpStream};
+use tokio_util::codec::LengthDelimitedCodec;
 
 use crate::sweet_noise::{generate_keypair, MSG_LEN};
 
@@ -20,22 +22,27 @@ pub async fn connect_to_node(connection: &mut TcpStream) -> Result<()> {
         .await
         .context("while negotiating noise protocol")?;
 
-    let mut transport = execute_noise_handshake(connection)
+    let mut noise_transport = execute_noise_handshake(connection)
         .await
         .context("While handshaking in noise")?;
 
     info!("session established!");
 
     // After successful handshake, Ipfs sends multistream message over secure transport
-    let mut rcv_buf = BytesMut::zeroed(MSG_LEN);
-    let rcv = connection.read(&mut rcv_buf).await.unwrap();
+    let mut tcp_transport = LengthDelimitedCodec::builder()
+        .length_field_type::<u16>()
+        .max_frame_length(MSG_LEN)
+        .new_framed(connection);
 
-    println!("read {rcv} bytes");
-    rcv_buf.resize(rcv, 0);
-    let len = rcv_buf.get_u16();
-    println!("len in payload {len} bytes");
+    let rcv_buf = tcp_transport
+        .next()
+        .await
+        .context("Unexpected EOF")?
+        .context("invalid message format")?;
 
-    let plaintext = transport.read_message(&rcv_buf).unwrap();
+    let plaintext = noise_transport
+        .read_message(&rcv_buf)
+        .context("While decrypting the message after a handshake")?;
 
     info!(
         "Message over secure layer: {:?}",
