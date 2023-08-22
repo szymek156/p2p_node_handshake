@@ -3,7 +3,7 @@
 
 use crate::sweet_noise::{handshake_sm, IPFS_NOISE_PROTOCOL_NAME, MSG_LEN};
 use anyhow::{anyhow, Context, Result};
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
 use log::debug;
@@ -74,13 +74,11 @@ impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake1<'conn, T> {
     /// Sends ephemeral key over the wire and returns second state
     pub async fn send_e(mut self) -> Result<IpfsNoiseHandshake2<'conn, T>> {
         debug!("-> e");
-        let mut noise_message = BytesMut::zeroed(MSG_LEN);
-        let len = self
-            .initiator
-            .write_message(&[], &mut noise_message)
+        let mut noise_message = BytesMut::with_capacity(MSG_LEN);
+        self.initiator
+            .write_message(&mut Bytes::new(), &mut noise_message)
             .context("while writing the message in the SM")?;
 
-        noise_message.resize(len, 0u8);
         self.transport.send(noise_message.freeze()).await?;
 
         Ok(IpfsNoiseHandshake2 {
@@ -113,8 +111,7 @@ impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake2<'conn, T> {
 
         let mut raw_payload = BytesMut::new();
         debug!("<- read message");
-        self
-            .initiator
+        self.initiator
             .read_message(&mut rcv_buf.freeze(), &mut raw_payload)
             .context("while processing the response in 2nd stage")?;
 
@@ -174,19 +171,16 @@ impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake3<'conn, T> {
     pub async fn send_s(mut self, payload: messages::NoiseHandshakePayload) -> Result<()> {
         debug!("-> s, se");
 
-        let mut buf = BytesMut::zeroed(MSG_LEN);
+        let mut buf = BytesMut::with_capacity(MSG_LEN);
         let mut raw_payload = BytesMut::new();
 
         payload
             .encode(&mut raw_payload)
             .context("While encoding the payload to send")?;
 
-        let len = self
-            .initiator
-            .write_message(&raw_payload, &mut buf)
+        self.initiator
+            .write_message(&mut raw_payload.freeze(), &mut buf)
             .context("While processing 3rd stage of the handshake")?;
-
-        buf.resize(len, 0);
 
         self.transport.send(buf.freeze()).await?;
 

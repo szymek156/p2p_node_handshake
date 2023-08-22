@@ -232,13 +232,12 @@ impl HandshakeState {
         Ok(())
     }
 
-    pub fn write_message(&mut self, payload: &[u8], out: &mut [u8]) -> Result<usize> {
+    /// Advances state machine and puts data to the out buffer that suppouse to be send to the other side.
+    pub fn write_message(&mut self, payload: &mut Bytes, out: &mut BytesMut) -> Result<usize> {
         let Some(current_pattern) = self.message_patterns.next() else {
             // TODO: If there are no more message patterns returns two new CipherState objects by calling Split().
             return Err(anyhow!("No more message patterns to consume"));
         };
-
-        let mut buf = BytesMut::new();
 
         for token in current_pattern {
             match token {
@@ -255,7 +254,7 @@ impl HandshakeState {
                         self.e.as_ref().unwrap()
                     };
 
-                    buf.put_slice(e_dh.pubkey());
+                    out.put_slice(e_dh.pubkey());
 
                     self.symmetric_state.mix_hash(e_dh.pubkey())?;
                 }
@@ -265,7 +264,7 @@ impl HandshakeState {
                     };
 
                     let encrypted_s = self.symmetric_state.encrypt_and_hash(s.pubkey())?;
-                    buf.put_slice(&encrypted_s);
+                    out.put_slice(&encrypted_s);
                 }
                 MessagePatternToken::DhOp(dh_operation) => self.handle_dh_exchange(dh_operation)?,
             }
@@ -273,13 +272,13 @@ impl HandshakeState {
 
         // Appends EncryptAndHash(payload) to the buffer.
         let ct_payload = self.symmetric_state.encrypt_and_hash(payload)?;
-        buf.put_slice(&ct_payload);
+        out.put_slice(&ct_payload);
 
-        out[..buf.len()].copy_from_slice(&buf);
-
-        Ok(buf.len())
+        Ok(out.len())
     }
 
+    /// Reads the response, takes action according to current machine state, writes out decrypted
+    /// responder payload, if any.
     pub fn read_message(&mut self, input: &mut Bytes, payload: &mut BytesMut) -> Result<usize> {
         let Some(current_pattern) = self.message_patterns.next() else {
             // TODO: If there are no more message patterns returns two new CipherState objects by calling Split().
@@ -337,7 +336,7 @@ impl HandshakeState {
         // Calls DecryptAndHash() on the remaining bytes of the message and stores the output into payload_buffer.
         let plaintext = self
             .symmetric_state
-            .decrypt_and_hash(&input)
+            .decrypt_and_hash(input)
             .context("while decrypting payload")?;
 
         payload.put_slice(&plaintext);

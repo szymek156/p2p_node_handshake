@@ -5,7 +5,7 @@ use prost::Message;
 use snow::Keypair;
 use tokio::{io::AsyncReadExt, net::TcpStream};
 
-use crate::sweet_noise::generate_keypair;
+use crate::sweet_noise::{generate_keypair, MSG_LEN};
 
 use self::noise_handshake::{
     messages::{self, NoiseHandshakePayload},
@@ -25,8 +25,8 @@ pub async fn connect_to_node(connection: &mut TcpStream) -> Result<()> {
         .context("While handshaking in noise")?;
 
     // TODO: split?
-    let mut rcv_buf = BytesMut::zeroed(65535);
-    let rcv = connection.read(&mut rcv_buf).await?;
+    let mut rcv_buf = BytesMut::zeroed(MSG_LEN);
+    let rcv = connection.read(&mut rcv_buf).await.unwrap();
     println!("read {rcv} bytes");
     rcv_buf.resize(rcv, 0);
     let len = rcv_buf.get_u16();
