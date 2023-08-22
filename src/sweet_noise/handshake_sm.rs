@@ -168,18 +168,12 @@ impl SymmetricState {
 
     /// Returns a pair of CipherState objects for encrypting transport messages.
     fn split(&self) -> Result<(CipherState, CipherState)> {
-        // Executes the following steps
-        //      If HASHLEN is 64, then truncates temp_k1 and temp_k2 to 32 bytes.
-        //      Creates two new CipherState objects c1 and c2.
-        //      Calls c1.InitializeKey(temp_k1) and c2.InitializeKey(temp_k2).
-        //      Returns the pair (c1, c2).
-
         let mut hasher = crypto_primitives::get_hasher()?;
 
         let mut temp_k1 = HashDigest::default();
         let mut temp_k2 = HashDigest::default();
 
-        //      Sets temp_k1, temp_k2 = HKDF(ck, zerolen, 2).
+        // Sets temp_k1, temp_k2 = HKDF(ck, zerolen, 2).
         hasher.hkdf(&self.ck, &[], 2, &mut temp_k1, &mut temp_k2, &mut []);
 
         let c1 = CipherState::initialize_key(Some(temp_k1.into()));

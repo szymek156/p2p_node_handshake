@@ -29,12 +29,13 @@ pub async fn connect_to_node(connection: &mut TcpStream) -> Result<()> {
     // After successful handshake, Ipfs sends multistream message over secure transport
     let mut rcv_buf = BytesMut::zeroed(MSG_LEN);
     let rcv = connection.read(&mut rcv_buf).await.unwrap();
+
     println!("read {rcv} bytes");
     rcv_buf.resize(rcv, 0);
     let len = rcv_buf.get_u16();
     println!("len in payload {len} bytes");
 
-    let plaintext = transport.read_message(&mut rcv_buf).unwrap();
+    let plaintext = transport.read_message(&rcv_buf).unwrap();
 
     info!(
         "Message over secure layer: {:?}",
