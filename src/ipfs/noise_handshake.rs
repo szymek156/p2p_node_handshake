@@ -171,6 +171,7 @@ pub struct IpfsNoiseHandshake3<'conn, T: AsyncGenericResponder> {
 }
 
 impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake3<'conn, T> {
+    /// Last step of the handshake, as a result noise transport object is returned.
     pub async fn send_s(
         mut self,
         payload: messages::NoiseHandshakePayload,
@@ -194,7 +195,7 @@ impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake3<'conn, T> {
     }
 }
 
-/// Implements fourth stage of the handshake: generate keys for transport
+/// Transport used to encrypt/decrypt data and send it over established noise connection
 pub struct NoiseSecureTransport {
     #[allow(dead_code)]
     encrypt: CipherState,
@@ -208,7 +209,6 @@ impl NoiseSecureTransport {
         Ok(Self { encrypt, decrypt })
     }
 
-    // TODO: make the interface unified
     pub(crate) fn read_message(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>> {
         let plaintext = self.decrypt.decrypt_with_ad(&[], ciphertext)?;
         Ok(plaintext)
@@ -232,7 +232,7 @@ mod tests {
     use crate::ipfs::create_payload;
 
     use super::*;
-    /// Contains dump of one of successful session messages
+    /// Contains dump of successful session
     struct FakeResponder {
         read_buffers: Vec<Vec<u8>>,
         write_buffers: Vec<Vec<u8>>,

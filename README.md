@@ -18,12 +18,18 @@ Daemon is ready
 ```
 After that IPFS node is up and running and ready to accept connections.
 ## Start initiator
-Run `RUST_LOG=info cargo run` in the root of this repository to start a connection establishment process.
+On other terminal run `RUST_LOG=info cargo run` in the root of this repository to start a connection establishment process.
 
 Successful run should be indicated by logs:
 ```
-Connection established!
+ INFO  p2p_node_handshake > Connecting to IPFS node on 127.0.0.1:4001...
+ INFO  p2p_node_handshake::ipfs::multistream > Using multiselect protocol to select noise...
+ INFO  p2p_node_handshake::ipfs::multistream > Noise protocol negotiated!
+ INFO  p2p_node_handshake::ipfs              > Noise handshake begin
+ INFO  p2p_node_handshake::ipfs              > Session established!
+ INFO  p2p_node_handshake                    > Message over secure layer: "\u{13}/multistream/1.0.0\n"
 ```
+That means noise handshake is done, secure layer is used to transfer messages, and it's possible to decrypt them.
 
 # Testing
 Run `RUST_LOG=info cargo test`

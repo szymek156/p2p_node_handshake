@@ -190,7 +190,6 @@ pub struct HandshakeState {
     rs: Option<DhKey>,
     re: Option<DhKey>,
     message_patterns: IntoIter<Vec<MessagePatternToken>>,
-    // TODO: initiator flag, or type state?
 }
 
 #[derive(Debug)]
@@ -210,10 +209,10 @@ enum MessagePatternDhOpToken {
 }
 
 impl HandshakeState {
-    // TODO: builder pattern required? Maybe typestate pattern, to enforce s to be set
     pub fn initialize(protocol_name: &str, local_static_priv: &[u8]) -> Result<Self> {
         let mut symmetric_state = SymmetricState::initialize_symmetric(protocol_name)?;
 
+        // For now support only XX
         let message_patterns = vec![
             vec![MessagePatternToken::E],
             vec![
@@ -254,7 +253,7 @@ impl HandshakeState {
         Ok(())
     }
 
-    /// Advances state machine and puts data to the out buffer that suppouse to be send to the other side.
+    /// Advances state machine and puts data to the out buffer that suppose to be send to the other side.
     pub fn write_message(&mut self, payload: &mut Bytes, out: &mut BytesMut) -> Result<usize> {
         let Some(current_pattern) = self.message_patterns.next() else {
             return Err(anyhow!("No more message patterns to consume"));
