@@ -9,7 +9,7 @@ use crate::sweet_noise::{generate_keypair, MSG_LEN};
 
 use self::noise_handshake::{
     messages::{self, NoiseHandshakePayload},
-    IpfsNoiseHandshake1,
+    IpfsNoiseHandshake1, NoiseSecureTransport,
 };
 mod multistream;
 pub mod noise_handshake;
@@ -20,11 +20,13 @@ pub async fn connect_to_node(connection: &mut TcpStream) -> Result<()> {
         .await
         .context("while negotiating noise protocol")?;
 
-    execute_noise_handshake(connection)
+    let mut transport = execute_noise_handshake(connection)
         .await
         .context("While handshaking in noise")?;
 
-    // TODO: split?
+    info!("session established!");
+
+    // After successful handshake, Ipfs sends multistream message over secure transport
     let mut rcv_buf = BytesMut::zeroed(MSG_LEN);
     let rcv = connection.read(&mut rcv_buf).await.unwrap();
     println!("read {rcv} bytes");
@@ -32,13 +34,18 @@ pub async fn connect_to_node(connection: &mut TcpStream) -> Result<()> {
     let len = rcv_buf.get_u16();
     println!("len in payload {len} bytes");
 
-    info!("session established!");
+    let plaintext = transport.read_message(&mut rcv_buf).unwrap();
+
+    info!(
+        "Message over secure layer: {:?}",
+        String::from_utf8_lossy(&plaintext)
+    );
 
     Ok(())
 }
 
 /// Start noise handshake to upgrade current connection with the secure layer
-async fn execute_noise_handshake(connection: &mut TcpStream) -> Result<()> {
+async fn execute_noise_handshake(connection: &mut TcpStream) -> Result<NoiseSecureTransport> {
     info!("Noise handshake begin");
     let static_keypair = generate_keypair()?;
     let id_keypair = libp2p::identity::ed25519::Keypair::generate();
@@ -57,12 +64,12 @@ async fn execute_noise_handshake(connection: &mut TcpStream) -> Result<()> {
     let local_payload = create_payload(&static_keypair, &id_keypair)
         .context("while preparing the payload to send")?;
 
-    handshake
+    let transport = handshake
         .send_s(local_payload)
         .await
         .context("while sending s")?;
 
-    Ok(())
+    Ok(transport)
 }
 
 /// Creates a payload that is expected to be send at "-> s, se" stage of the handshake

@@ -37,11 +37,7 @@ impl CipherState {
 
             cipher.encrypt(self.n, ad, plaintext, &mut ciphertext);
 
-            if self.n == MAX_NONCE {
-                return Err(anyhow!("Nonce overflow"));
-            }
-
-            self.n += 1;
+            self.increment_nonce()?;
 
             ciphertext
         } else {
@@ -62,7 +58,7 @@ impl CipherState {
             let mut plaintext = vec![0u8; message_len];
             cipher.decrypt(self.n, ad, ciphertext, &mut plaintext)?;
 
-            self.n += 1;
+            self.increment_nonce()?;
 
             plaintext
         } else {
@@ -70,6 +66,16 @@ impl CipherState {
         };
 
         Ok(plaintext)
+    }
+
+    fn increment_nonce(&mut self) -> Result<()> {
+        if self.n == MAX_NONCE {
+            return Err(anyhow!("Nonce overflow"));
+        }
+
+        self.n += 1;
+
+        Ok(())
     }
 
     fn has_key(&self) -> bool {
@@ -87,7 +93,7 @@ pub struct SymmetricState {
 }
 
 impl SymmetricState {
-    pub fn initialize_symmetric(protocol_name: &str) -> Result<Self> {
+    fn initialize_symmetric(protocol_name: &str) -> Result<Self> {
         if protocol_name != IPFS_NOISE_PROTOCOL_NAME {
             return Err(anyhow!(
                 "Implementation currently supports only {IPFS_NOISE_PROTOCOL_NAME}"
@@ -122,7 +128,7 @@ impl SymmetricState {
     /// Sets ck, temp_k = HKDF(ck, input_key_material, 2).
     /// If HASHLEN is 64, then truncates temp_k to 32 bytes.
     /// Calls InitializeKey(temp_k).
-    pub fn mix_key(&mut self, input_key: &[u8]) -> Result<()> {
+    fn mix_key(&mut self, input_key: &[u8]) -> Result<()> {
         let mut hasher = crypto_primitives::get_hasher()?;
 
         let mut ck = HashDigest::default();
@@ -137,7 +143,7 @@ impl SymmetricState {
     }
 
     /// Sets h = HASH(h || data)
-    pub fn mix_hash(&mut self, data: &[u8]) -> Result<()> {
+    fn mix_hash(&mut self, data: &[u8]) -> Result<()> {
         let mut hasher = crypto_primitives::get_hasher()?;
         hasher.input(&self.h);
         hasher.input(data);
@@ -146,7 +152,7 @@ impl SymmetricState {
         Ok(())
     }
 
-    pub fn encrypt_and_hash(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
+    fn encrypt_and_hash(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let ciphertext = self.cipher_state.encrypt_with_ad(&self.h, plaintext)?;
 
         self.mix_hash(&ciphertext)?;
@@ -158,6 +164,28 @@ impl SymmetricState {
         let plaintext = self.cipher_state.decrypt_with_ad(&self.h, ciphertext)?;
         self.mix_hash(ciphertext)?;
         Ok(plaintext)
+    }
+
+    /// Returns a pair of CipherState objects for encrypting transport messages.
+    fn split(&self) -> Result<(CipherState, CipherState)> {
+        // Executes the following steps
+        //      If HASHLEN is 64, then truncates temp_k1 and temp_k2 to 32 bytes.
+        //      Creates two new CipherState objects c1 and c2.
+        //      Calls c1.InitializeKey(temp_k1) and c2.InitializeKey(temp_k2).
+        //      Returns the pair (c1, c2).
+
+        let mut hasher = crypto_primitives::get_hasher()?;
+
+        let mut temp_k1 = HashDigest::default();
+        let mut temp_k2 = HashDigest::default();
+
+        //      Sets temp_k1, temp_k2 = HKDF(ck, zerolen, 2).
+        hasher.hkdf(&self.ck, &[], 2, &mut temp_k1, &mut temp_k2, &mut []);
+
+        let c1 = CipherState::initialize_key(Some(temp_k1.into()));
+        let c2 = CipherState::initialize_key(Some(temp_k2.into()));
+
+        Ok((c1, c2))
     }
 }
 
@@ -235,7 +263,6 @@ impl HandshakeState {
     /// Advances state machine and puts data to the out buffer that suppouse to be send to the other side.
     pub fn write_message(&mut self, payload: &mut Bytes, out: &mut BytesMut) -> Result<usize> {
         let Some(current_pattern) = self.message_patterns.next() else {
-            // TODO: If there are no more message patterns returns two new CipherState objects by calling Split().
             return Err(anyhow!("No more message patterns to consume"));
         };
 
@@ -281,7 +308,6 @@ impl HandshakeState {
     /// responder payload, if any.
     pub fn read_message(&mut self, input: &mut Bytes, payload: &mut BytesMut) -> Result<usize> {
         let Some(current_pattern) = self.message_patterns.next() else {
-            // TODO: If there are no more message patterns returns two new CipherState objects by calling Split().
             return Err(anyhow!("No more message patterns to consume"));
         };
 
@@ -342,6 +368,10 @@ impl HandshakeState {
         payload.put_slice(&plaintext);
 
         Ok(plaintext.len())
+    }
+
+    pub fn split(&self) -> Result<(CipherState, CipherState)> {
+        self.symmetric_state.split()
     }
 
     fn handle_dh_exchange(

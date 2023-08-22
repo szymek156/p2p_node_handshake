@@ -1,12 +1,15 @@
 //! Implementation of noise protocol handshake used in IPFS
 //! Uses typestate pattern to avoid misuse
 
-use crate::sweet_noise::{handshake_sm, IPFS_NOISE_PROTOCOL_NAME, MSG_LEN};
+use crate::sweet_noise::{
+    handshake_sm::{self, CipherState},
+    HashDigest, IPFS_NOISE_PROTOCOL_NAME, MSG_LEN,
+};
 use anyhow::{anyhow, Context, Result};
 use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
-use log::debug;
+use log::{debug, info};
 use prost::Message;
 
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -168,7 +171,10 @@ pub struct IpfsNoiseHandshake3<'conn, T: AsyncGenericResponder> {
 }
 
 impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake3<'conn, T> {
-    pub async fn send_s(mut self, payload: messages::NoiseHandshakePayload) -> Result<()> {
+    pub async fn send_s(
+        mut self,
+        payload: messages::NoiseHandshakePayload,
+    ) -> Result<NoiseSecureTransport> {
         debug!("-> s, se");
 
         let mut buf = BytesMut::with_capacity(MSG_LEN);
@@ -184,14 +190,42 @@ impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake3<'conn, T> {
 
         self.transport.send(buf.freeze()).await?;
 
-        // TODO: step 4 - call split?
-        Ok(())
+        Ok(NoiseSecureTransport::init(self.initiator)?)
+    }
+}
+
+/// Implements fourth stage of the handshake: generate keys for transport
+pub struct NoiseSecureTransport {
+    encrypt: CipherState,
+    decrypt: CipherState,
+}
+
+impl NoiseSecureTransport {
+    pub fn init(initiator: HandshakeState) -> Result<Self> {
+        let (encrypt, decrypt) = initiator.split()?;
+
+        Ok(Self { encrypt, decrypt })
+    }
+
+    // TODO: make the interface unified
+    pub(crate) fn read_message(&mut self, ciphertext: &mut BytesMut) -> Result<Vec<u8>> {
+        let plaintext = self.decrypt.decrypt_with_ad(&[], ciphertext)?;
+        Ok(plaintext)
+    }
+
+    pub fn write_message(&mut self, plaintext: &mut Bytes) -> Result<Vec<u8>> {
+        let ciphertext = self.encrypt.encrypt_with_ad(&[], &plaintext)?;
+
+        Ok(ciphertext)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::task::Poll;
+
+    use bytes::Buf;
+    use tokio::io::AsyncReadExt;
 
     use crate::ipfs::create_payload;
 
@@ -204,6 +238,7 @@ mod tests {
         ephemeral_keypair: snow::Keypair,
         id_keypair: libp2p::identity::ed25519::Keypair,
         decrypted_responder_payload: Vec<u8>,
+        decrypted_message_after_handshake: Vec<u8>,
         current_read: usize,
         current_write: usize,
     }
@@ -249,6 +284,11 @@ mod tests {
                 83, 154, 107, 64, 215, 19, 170, 87, 28, 105, 219, 172, 7, 34, 28, 18, 12, 47, 121,
                 97, 109, 117, 120, 47, 49, 46, 48, 46, 48, 18, 12, 47, 109, 112, 108, 101, 120, 47,
                 54, 46, 55, 46, 48,
+            ];
+
+            let decrypted_message_after_handshake = vec![
+                19, 47, 109, 117, 108, 116, 105, 115, 116, 114, 101, 97, 109, 47, 49, 46, 48, 46,
+                48, 10,
             ];
 
             FakeResponder {
@@ -300,6 +340,8 @@ mod tests {
                 ephemeral_keypair,
                 id_keypair,
                 decrypted_responder_payload,
+                decrypted_message_after_handshake,
+
                 current_read: 0,
                 current_write: 0,
             }
@@ -321,6 +363,10 @@ mod tests {
 
         fn id_keypair(&self) -> libp2p::identity::ed25519::Keypair {
             self.id_keypair.clone()
+        }
+
+        fn plaintext_message_after_handshake(&self) -> Vec<u8> {
+            self.decrypted_message_after_handshake.clone()
         }
     }
 
@@ -387,6 +433,7 @@ mod tests {
         let expected_payload =
             NoiseHandshakePayload::decode(fake_responder.decrypted_responder_payload.as_slice())
                 .unwrap();
+        let expected_plaintext = fake_responder.plaintext_message_after_handshake();
 
         let handshake = IpfsNoiseHandshake1::new_for_test(
             &mut fake_responder,
@@ -403,6 +450,18 @@ mod tests {
 
         let payload = create_payload(&static_keypair, &id_keypair).unwrap();
 
-        handshake.send_s(payload).await.unwrap();
+        let mut transport = handshake.send_s(payload).await.unwrap();
+
+        // Message send over secure layer, try to decrypt
+        let mut encrypted_message = BytesMut::zeroed(MSG_LEN);
+        let n = fake_responder.read(&mut encrypted_message).await.unwrap();
+        encrypted_message.resize(n, 0);
+
+        // skip header
+        encrypted_message.advance(2);
+
+        let plaintext = transport.read_message(&mut encrypted_message).unwrap();
+
+        assert_eq!(plaintext, expected_plaintext);
     }
 }
