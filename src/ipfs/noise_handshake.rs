@@ -3,13 +3,13 @@
 
 use crate::sweet_noise::{
     handshake_sm::{self, CipherState},
-    HashDigest, IPFS_NOISE_PROTOCOL_NAME, MSG_LEN,
+    IPFS_NOISE_PROTOCOL_NAME, MSG_LEN,
 };
 use anyhow::{anyhow, Context, Result};
 use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
-use log::{debug, info};
+use log::debug;
 use prost::Message;
 
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -190,7 +190,7 @@ impl<'conn, T: AsyncGenericResponder> IpfsNoiseHandshake3<'conn, T> {
 
         self.transport.send(buf.freeze()).await?;
 
-        Ok(NoiseSecureTransport::init(self.initiator)?)
+        NoiseSecureTransport::init(self.initiator)
     }
 }
 
@@ -216,7 +216,7 @@ impl NoiseSecureTransport {
 
     #[allow(dead_code)]
     pub fn write_message(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let ciphertext = self.decrypt.encrypt_with_ad(&[], &plaintext)?;
+        let ciphertext = self.decrypt.encrypt_with_ad(&[], plaintext)?;
 
         Ok(ciphertext)
     }
@@ -462,7 +462,7 @@ mod tests {
         // skip header
         encrypted_message.advance(2);
 
-        let plaintext = transport.read_message(&mut encrypted_message).unwrap();
+        let plaintext = transport.read_message(&encrypted_message).unwrap();
 
         assert_eq!(plaintext, expected_plaintext);
     }

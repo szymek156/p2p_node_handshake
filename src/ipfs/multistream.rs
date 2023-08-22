@@ -4,17 +4,12 @@ use anyhow::{anyhow, Context, Result};
 use bytes::{BufMut, BytesMut};
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, info};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::net::TcpStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 const NOT_SUPPORTED: &str = "na";
 const MULTISTREAM_PROTOCOL: &str = "/multistream/1.0.0";
 const NOISE_PROTOCOL: &str = "/noise";
-// TODO: add trait for tcpstream, MultistreamResponder that does the message framing
-// add tests
 
 struct MultiselectConnection<'conn> {
     transport: Framed<&'conn mut TcpStream, LengthDelimitedCodec>,

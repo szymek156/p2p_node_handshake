@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use futures_util::StreamExt;
 use log::{debug, info};
 use prost::Message;
 use snow::Keypair;
-use tokio::{io::AsyncReadExt, net::TcpStream};
+use tokio::net::TcpStream;
 use tokio_util::codec::LengthDelimitedCodec;
 
 use crate::sweet_noise::{generate_keypair, MSG_LEN};
